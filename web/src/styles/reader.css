@@ -365,6 +365,40 @@ select {
 }
 
 /*
+ * Scrollbars inside the reader.
+ *
+ * The OS bar is a grey trough with stepper arrows that belongs to no theme, and
+ * at the right edge of the page it is the one element on screen that announces
+ * "this is a web page". Here it is reduced to what it is actually for — a
+ * translucent rounded thumb saying how far in you are: no track, no arrows, and
+ * a fill mixed from the reader's own ink so it follows light, dark and every
+ * paper.
+ *
+ * The two spellings are kept apart on purpose: once Chrome accepts
+ * `scrollbar-width`/`scrollbar-color` it ignores `::-webkit-scrollbar`
+ * altogether, which silently drops the rounding and the exact colour. So the
+ * standard pair is for engines with no webkit pseudo-elements (Firefox), and
+ * everything else gets the pseudo-elements.
+ */
+@supports not selector(::-webkit-scrollbar) {
+  .reader-screen,
+  .reader-screen * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--reader-ink) 32%, transparent) transparent;
+  }
+}
+.reader-screen ::-webkit-scrollbar { width: 8px; height: 8px; }
+.reader-screen ::-webkit-scrollbar-track { background: transparent; }
+.reader-screen ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--reader-ink) 32%, transparent);
+  border-radius: var(--radius-pill);
+}
+.reader-screen ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--reader-ink) 48%, transparent); }
+/* No stepper arrows and no corner box: they were the bars that read as chrome. */
+.reader-screen ::-webkit-scrollbar-button { display: none; }
+.reader-screen ::-webkit-scrollbar-corner { background: transparent; }
+
+/*
  * Fixed-layout pages are advanced by the pager, not scrolled, so the host must
  * not be a scroll container: a nested scroll area on top of a horizontal pager
  * produces the classic "the page drifts sideways" bug on Android.
