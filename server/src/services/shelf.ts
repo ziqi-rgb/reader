@@ -170,6 +170,17 @@ export class ShelfService {
   list(userId: string, options: ListOptions = {}): { items: BookDto[]; total: number; page: number; pageSize: number } {
     const page = Math.max(1, options.page ?? 1);
     const pageSize = Math.min(200, Math.max(1, options.pageSize ?? 50));
+    /**
+     * A field's *effective* value: the reader's manual override when one exists,
+     * the base column otherwise.
+     *
+     * Filters have to match what the shelf draws. The card shows
+     * `applyOverrides`' result, so a filter on the raw column would hide exactly
+     * the books the reader just labelled by hand — a 丛书 set through the shelf UI
+     * lives only in `metadata_overrides`, and a raw `b.series = ?` finds none of it.
+     */
+    const effectiveField = (field: 'title' | 'author' | 'series') =>
+      `COALESCE((SELECT m.value FROM metadata_overrides m WHERE m.book_id = b.id AND m.field = '${field}'), b.${field})`;
     /*
      * Two scopes, and the difference is *which set* the reader is asking about.
      *
@@ -205,16 +216,16 @@ export class ShelfService {
     }
 
     if (options.search) {
-      where.push('(b.title LIKE ? OR b.author LIKE ? OR b.series LIKE ? OR b.isbn = ?)');
+      where.push(`(${effectiveField('title')} LIKE ? OR ${effectiveField('author')} LIKE ? OR ${effectiveField('series')} LIKE ? OR b.isbn = ?)`);
       const like = `%${options.search}%`;
       params.push(like, like, like, options.search);
     }
     if (options.author) {
-      where.push('b.author = ?');
+      where.push(`${effectiveField('author')} = ?`);
       params.push(options.author);
     }
     if (options.series) {
-      where.push('b.series = ?');
+      where.push(`${effectiveField('series')} = ?`);
       params.push(options.series);
     }
     if (options.format) {
@@ -443,7 +454,10 @@ export class ShelfService {
   /** Library-wide facets, used to build the client's filter UI. */
   facets(userId: string): { authors: string[]; series: string[]; tags: string[]; formats: string[] } {
     const rows = this.db.all<{ author: string; series: string; tags: string; format: string }>(
-      `SELECT b.author, b.series, b.tags, b.format
+      `SELECT
+         COALESCE((SELECT m.value FROM metadata_overrides m WHERE m.book_id = b.id AND m.field = 'author'), b.author) AS author,
+         COALESCE((SELECT m.value FROM metadata_overrides m WHERE m.book_id = b.id AND m.field = 'series'), b.series) AS series,
+         b.tags, b.format
        FROM books b JOIN user_books ub ON ub.book_id = b.id
        WHERE ub.user_id = ? AND ub.hidden = 0`, userId,
     );

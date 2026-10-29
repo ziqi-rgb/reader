@@ -1227,9 +1227,15 @@ export class ReaderScreen {
       return;
     }
     if (!moved) {
-      if (direction === 'next' && this.atLastChapter()) {
-        const advanced = await this.openNextInSeries();
+      // 丛书: the page past the last one of the last chapter continues into the next
+      // volume, and the one before a first page walks back into the previous one.
+      if (this.atLastChapter() && (direction === 'next')) {
+        const advanced = await this.openSiblingVolume(1);
         if (advanced) return;
+      }
+      if (this.atFirstChapter() && (direction === 'previous')) {
+        const backed = await this.openSiblingVolume(-1);
+        if (backed) return;
       }
       this.flashStatus(direction === 'next' ? '已经是最后一页' : '已经是第一页');
       return;
@@ -1514,6 +1520,9 @@ export class ReaderScreen {
     // the ☰ button — which, on a NAS over a tunnel, is a visible pause before the
     // panel appears.
     if (!force && this.chrome.toc.length > 0) return;
+    // Opening the panel is the moment the 丛书 structure matters, so make sure the
+    // volume list is there even if the fire-and-forget fetch from `open()` lost a race.
+    if (book.series) await this.resolveSeriesBooks();
     const series = this.seriesBooks.length > 1;
     // Inside a 丛书 the panel must list *every* chapter of the open volume, so it
     // asks `/toc` for the whole book instead of reading the loaded window's items
@@ -1759,12 +1768,17 @@ export class ReaderScreen {
     // has no business deciding where the book ends.
     const target = view.currentChapterPosition + delta;
     if (target < 0) {
+      // 丛书: the volume before this one continues the book backwards, landing on its last chapter.
+      if (delta === -1) {
+        const backed = await this.openSiblingVolume(-1);
+        if (backed) return;
+      }
       this.flashStatus('已经是第一章', 1800);
       return;
     }
     if (this.chapterCount > 0 && target >= this.chapterCount) {
       if (delta === 1) {
-        const advanced = await this.openNextInSeries();
+        const advanced = await this.openSiblingVolume(1);
         if (advanced) return;
       }
       this.flashStatus('已经是最后一章', 1800);
@@ -1797,42 +1811,73 @@ export class ReaderScreen {
     return total > 0 && view.currentChapterPosition + 1 >= total;
   }
 
+  /** True when the open chapter is the book's first one. */
+  private atFirstChapter(): boolean {
+    return (this.view?.currentChapterPosition ?? -1) === 0;
+  }
+
+  /**
+   * The 丛书's member books, in `seriesIndex` order.
+   *
+   * Fetched lazily and cached on the screen: the contents panel and the
+   * volume hand-off both want it, and re-asking the shelf for every one of them
+   * would be a request per panel open.
+   */
+  private async resolveSeriesBooks(): Promise<Book[]> {
+    if (this.seriesBooks.length > 0) return this.seriesBooks;
+    const book = this.book;
+    if (!book?.series) return [];
+    try {
+      const { items } = await this.options.api.listBooks({ series: book.series, pageSize: 200 });
+      if (this.book?.id !== book.id) return [];  // a different book opened meanwhile
+      this.seriesBooks = items
+        .filter((candidate) => candidate.seriesIndex != null)
+        .sort((a, b) => a.seriesIndex! - b.seriesIndex!);
+    } catch { /* the panel simply stays a plain list */ }
+    return this.seriesBooks;
+  }
+
   /**
    * Loads the 丛书's member books (titles only, no chapters yet) so the contents
    * panel can list every volume in order.
    */
   private async loadSeriesBooks(book: Book): Promise<void> {
     if (!book.series) { this.seriesBooks = []; return; }
-    try {
-      const { items } = await this.options.api.listBooks({ series: book.series, pageSize: 200 });
-      // A different book may have been opened while the shelf query was in flight.
-      if (this.book?.id !== book.id) return;
-      this.seriesBooks = items
-        .filter((candidate) => candidate.seriesIndex != null)
-        .sort((a, b) => a.seriesIndex! - b.seriesIndex!);
-      if (this.chrome.tocOpen && this.seriesBooks.length > 1) await this.renderToc(true);
-    } catch { this.seriesBooks = []; }
+    await this.resolveSeriesBooks();
+    if (this.book?.id !== book.id) return;
+    if (this.chrome.tocOpen && this.seriesBooks.length > 1) await this.renderToc(true);
   }
 
   /**
-   * 丛书自动切册：读完一册的最后一章，打开编号更大的下一册。
-   * The server lists every book of the 丛书 (the shelf's own `series` filter);
-   * the next volume is the one whose `seriesIndex` is the smallest number above
-   * this book's. `false` means there is no 丛书, or this is already the last
-   * volume, and the caller reports "已经是最后一章".
+   * 丛书 volume hand-off: step to the next (+1) or the previous (-1) volume.
+   *
+   * This is what makes a 丛书 read as one book rather than a stack of them: the
+   * reader who turns past the last chapter of a volume continues into the next
+   * one, and the same gesture at a first chapter walks back into the previous
+   * volume's **last** chapter.
+   *
+   * `false` means there is no 丛书, or this is the end of the run, and the caller
+   * reports "已经是最后一章/第一章".
    */
-  private async openNextInSeries(): Promise<boolean> {
+  private async openSiblingVolume(direction: 1 | -1): Promise<boolean> {
     const book = this.book;
     if (!book || !book.series || book.seriesIndex == null) return false;
     try {
-      const { items } = await this.options.api.listBooks({ series: book.series, pageSize: 200 });
-      const next = items
-        .filter((candidate) => candidate.seriesIndex != null && candidate.seriesIndex > book.seriesIndex!)
-        .sort((a, b) => a.seriesIndex! - b.seriesIndex!)[0];
-      if (!next) return false;
-      if (this.options.onOpenBook) { this.options.onOpenBook(next.id); return true; }
-      await this.open(next);
-      this.flashStatus(`已切到《${next.title}》`, 2500);
+      const members = await this.resolveSeriesBooks();
+      const target = members
+        .filter((candidate) => candidate.seriesIndex != null
+          && (direction === 1 ? candidate.seriesIndex > book.seriesIndex! : candidate.seriesIndex < book.seriesIndex!))
+        .sort((a, b) => (direction === 1 ? a.seriesIndex! - b.seriesIndex! : b.seriesIndex! - a.seriesIndex!))[0];
+      if (!target) return false;
+      // Backward has to name the last chapter: the new volume's stored position
+      // belongs to a place the reader left, not to where this text continues.
+      let section: string | undefined;
+      if (direction === -1) {
+        try { section = (await this.options.api.toc(target.id)).at(-1)?.href; } catch { section = undefined; }
+      }
+      if (this.options.onOpenBook) { this.options.onOpenBook(target.id, section); return true; }
+      await this.open(target, section);
+      this.flashStatus(`已切到《${target.title}》`, 2500);
       return true;
     } catch { return false; }
   }
