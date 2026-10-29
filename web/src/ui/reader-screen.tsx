@@ -196,6 +196,8 @@ export class ReaderScreen {
    */
   private seriesBooks: Book[] = [];
   private seriesToc = new Map<string, ChromeTocEntry[]>();
+  /** Volumes the reader has folded shut in the contents panel. */
+  private collapsedVolumes = new Set<string>();
   /** In-flight member-list fetch, so the panel and the hand-off share one request. */
   private seriesPromise: Promise<Book[]> | null = null;
   private chromeVisible = true;
@@ -312,7 +314,7 @@ export class ReaderScreen {
             onSpeakFromHere: () => void this.speakFromReaderPosition(),
             onSwitchEngine: (kind) => this.switchSpeechEngine(kind),
             onTocEntry: (ref) => void this.goToChapterRef(ref),
-            onExpandVolume: (bookId) => void this.expandVolume(bookId),
+            onToggleVolume: (bookId) => void this.toggleVolume(bookId),
             onSeriesChapter: (bookId, ref) => this.options.onOpenBook?.(bookId, ref),
             onChapter: (delta) => void this.goToChapter(delta),
             onBookInfo: () => this.patch({ bookInfoOpen: !this.chrome.bookInfoOpen }),
@@ -373,7 +375,7 @@ export class ReaderScreen {
     const token = ++this.loadingToken;
     this.toolsOpen = false; this.annotation = null; this.toolsReturn = ''; this.toolsSelection = null; this.stopPreview();
     this.content = null; this.book = book;
-    this.seriesBooks = []; this.seriesToc.clear(); this.seriesPromise = null;
+    this.seriesBooks = []; this.seriesToc.clear(); this.seriesPromise = null; this.collapsedVolumes.clear();
     this.patch({ bookId: book.id, title: book.title, author: book.author, description: book.description, series: book.series, seriesIndex: book.seriesIndex, canPrevVolume: false, canNextVolume: false, bookInfoOpen: false, canRefresh: book.format === 'chapters', canSwitch: false, alternatives: null, refreshingChapter: false, sourceName: '', chapterUrl: '', toc: [] });
     // Fire-and-forget: the volumes are a contents-panel nicety, and blocking the
     // book's own first paint on a shelf query would delay the page the reader asked for.
@@ -1576,30 +1578,30 @@ export class ReaderScreen {
     for (const volume of this.seriesBooks) {
       const isOwn = volume.id === book.id;
       const chapters = isOwn ? own : this.seriesToc.get(volume.id);
+      const collapsed = this.collapsedVolumes.has(volume.id);
       entries.push({
         id: 'vol:' + volume.id,
         label: `第 ${volume.seriesIndex ?? '?'} 册 · ${volume.title || '未命名'}`,
         depth: 0,
         group: true,
         bookId: volume.id,
-        meta: chapters ? `${chapters.length} 章` : '点击展开',
+        collapsed,
+        meta: collapsed
+          ? (chapters ? `${chapters.length} 章 · 已收起` : '点击展开')
+          : (chapters ? `${chapters.length} 章` : '加载中…'),
       });
-      if (chapters) for (const chapter of chapters) entries.push({ ...chapter, depth: 1, bookId: volume.id });
+      if (!collapsed && chapters) for (const chapter of chapters) entries.push({ ...chapter, depth: 1, bookId: volume.id });
     }
     return entries;
   }
 
   /** Loads one sibling volume's chapter list for the contents panel. */
-  private async expandVolume(bookId: string): Promise<void> {
+  private async fetchVolumeToc(bookId: string): Promise<void> {
     if (this.seriesToc.has(bookId)) return;
-    try {
-      const toc = await this.options.api.toc(bookId);
-      this.seriesToc.set(bookId, toc.map((entry) => ({ id: entry.href, label: entry.title, depth: 0 })));
-      await this.renderToc(true);
-    } catch (error) {
-      this.flashStatus(error instanceof Error ? error.message : '这一册的目录读取失败', 3000);
-    }
+    const toc = await this.options.api.toc(bookId);
+    this.seriesToc.set(bookId, toc.map((entry) => ({ id: entry.href, label: entry.title, depth: 0 })));
   }
+
 
   /**
    * Marks the contents entry the reader is in, and points the window's own
@@ -1860,6 +1862,31 @@ export class ReaderScreen {
     if (this.book?.id !== book.id) return;
     this.patchVolumeCaps();
     if (this.chrome.tocOpen && this.seriesBooks.length > 1) await this.renderToc(true);
+  }
+
+  /**
+   * Folds or unfolds one 丛书 volume in the contents panel.
+   *
+   * Both directions, because a 丛书 with three volumes of a thousand chapters
+   * each is unusable as a straight list: the reader opens one volume, reads the
+   * names, then wants it out of the way again.
+   */
+  private async toggleVolume(bookId: string): Promise<void> {
+    if (this.collapsedVolumes.has(bookId)) {
+      this.collapsedVolumes.delete(bookId);
+      // Unfolding a sibling nobody has fetched yet has to fetch it; the open
+      // volume's chapters are already in hand.
+      if (bookId !== this.book?.id) {
+        try { await this.fetchVolumeToc(bookId); }
+        catch (error) {
+          this.flashStatus(error instanceof Error ? error.message : '这一册的目录读取失败', 3000);
+          return;
+        }
+      }
+    } else {
+      this.collapsedVolumes.add(bookId);
+    }
+    await this.renderToc(true);
   }
 
   /**

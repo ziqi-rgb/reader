@@ -52,6 +52,8 @@ export interface ChromeTocEntry {
   bookId?: string;
   /** Right-hand hint on a volume header, e.g. "12 章" or "点击展开". */
   meta?: string;
+  /** This volume's chapter list is folded shut in the panel. */
+  collapsed?: boolean;
 }
 
 export interface SpeechBarState {
@@ -172,8 +174,8 @@ export interface ChromeHandlers {
   onSpeakFromHere(): void;
   onSwitchEngine(kind: AppSettings['ttsEngine']): void;
   onTocEntry(ref: string): void;
-  /** A 丛书 volume header was tapped: load that volume's chapters. */
-  onExpandVolume?(bookId: string): void;
+  /** A 丛书 volume header was tapped: fold that volume's chapter list open or shut. */
+  onToggleVolume?(bookId: string): void;
   /** A chapter of another 丛书 volume was tapped: switch books and jump there. */
   onSeriesChapter?(bookId: string, ref: string): void;
   onChapter(delta: 1 | -1): void;
@@ -347,12 +349,13 @@ export function ReaderChrome({ state, stage, handlers, tools }: ReaderChromeProp
                 hiddenDepth = null;
                 const hasChildren = (state.toc[index + 1]?.depth ?? -1) > entry.depth;
                 if (hasChildren && collapsed.has(entry.id)) hiddenDepth = entry.depth;
-                // A 丛书 volume divider: bold, not a chapter, taps to load that volume's list.
+                // A 丛书 volume divider: bold, not a chapter, taps to fold its list open or shut.
                 if (entry.group) {
                   const own = !entry.bookId || entry.bookId === state.bookId;
                   return (
                     <li key={entry.id + index} className="toc-group" data-current={own ? 'true' : undefined}>
-                      <button type="button" className="toc-group-head" disabled={own} title={own ? '当前册' : '点击展开这一册的章节'} onClick={() => entry.bookId && handlers.onExpandVolume?.(entry.bookId)}>
+                      <button type="button" className="toc-group-head" aria-expanded={!entry.collapsed} title={entry.collapsed ? '展开这一册的章节' : '收起这一册的章节'} onClick={() => entry.bookId && handlers.onToggleVolume?.(entry.bookId)}>
+                        <span className="toc-group-chevron" aria-hidden="true">{entry.collapsed ? '▸' : '▾'}</span>
                         <span className="toc-group-label">{entry.label}</span>
                         {entry.meta && <span className="toc-group-meta">{entry.meta}</span>}
                       </button>
