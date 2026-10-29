@@ -90,6 +90,8 @@ export interface ChromeState {
   alternativesSearching?: boolean;
   bookInfoOpen?: boolean;
   description?: string;
+  series?: string;
+  seriesIndex?: number | null;
   sourceName?: string;
   chapterUrl?: string;
   aiSummary?: string;
@@ -158,6 +160,7 @@ export interface ChromeHandlers {
   onTocEntry(ref: string): void;
   onChapter(delta: 1 | -1): void;
   onBookInfo?(): void;
+  onEditSeries?(series: string, seriesIndex: number | null): void;
   onAiSummary?(): void;
   onRefresh?(): void;
   onRefreshChapter?(): void;
@@ -205,6 +208,42 @@ export interface ReaderChromeProps {
   tools?: ReactNode;
 }
 
+/** The book's own identity, editable in place: 丛书名 + 编号. */
+function SeriesInfoSheet({ state, handlers }: { state: ChromeState; handlers: ChromeHandlers }): JSX.Element {
+  const [series, setSeries] = useState(state.series ?? '');
+  const [index, setIndex] = useState(state.seriesIndex != null ? String(state.seriesIndex) : '');
+  return (
+    <Sheet
+      title="书籍信息"
+      onClose={() => handlers.onBookInfo?.()}
+      footer={<>
+        <Button onClick={() => handlers.onEditSeries?.(series, index === '' ? null : Number(index))}>保存丛书</Button>
+      </>}>
+      <article className="book-detail">
+        <h3>{state.title}</h3>
+        <p className="book-detail-author">{state.author || '作者未知'}</p>
+        <dl>
+          <dt>书源</dt><dd>{state.sourceName || (state.canRefresh ? '远程书源' : '本地书籍')}</dd>
+          <dt>当前章节</dt><dd>{state.chapterLabel || '暂无信息'}</dd>
+        </dl>
+        <h4>丛书标记</h4>
+        <div className="sheet-form">
+          <div className="sheet-field">
+            <label htmlFor="reader-series">丛书名</label>
+            <input id="reader-series" type="text" value={series} onChange={event => setSeries(event.currentTarget.value)} placeholder="例如：三体" />
+          </div>
+          <div className="sheet-field">
+            <label htmlFor="reader-series-index">编号</label>
+            <input id="reader-series-index" type="number" min="1" step="1" value={index} onChange={event => setIndex(event.currentTarget.value)} placeholder="例如：1" />
+          </div>
+        </div>
+        <h4>内容简介</h4>
+        <p className="book-detail-description">{state.description || '暂无简介'}</p>
+      </article>
+    </Sheet>
+  );
+}
+
 export function ReaderChrome({ state, stage, handlers, tools }: ReaderChromeProps): JSX.Element {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   let hiddenDepth: number | null = null;
@@ -241,7 +280,7 @@ export function ReaderChrome({ state, stage, handlers, tools }: ReaderChromeProp
         </div>
         {(state.sourceName || state.chapterUrl) && <div className="reader-source-info"><span>{state.sourceName || '当前书源'}</span>{state.chapterUrl && <a href={state.chapterUrl} target="_blank" rel="noopener noreferrer" title={state.chapterUrl}>{state.chapterUrl}</a>}</div>}
       </div>
-      {state.bookInfoOpen && <Sheet title="书籍信息" onClose={() => handlers.onBookInfo?.()}><article className="book-detail"><h3>{state.title}</h3><p className="book-detail-author">{state.author || '作者未知'}</p><dl><dt>书源</dt><dd>{state.sourceName || (state.canRefresh ? '远程书源' : '本地书籍')}</dd><dt>当前章节</dt><dd>{state.chapterLabel || '暂无信息'}</dd></dl><h4>内容简介</h4><p className="book-detail-description">{state.description || '暂无简介'}</p></article></Sheet>}
+      {state.bookInfoOpen && <SeriesInfoSheet state={state} handlers={handlers} />}
       {state.aiSummaryBusy && <div className="floating-notice" role="status">正在生成章节总结…</div>}
       {state.aiSummary && <Sheet title="AI 章节总结" onClose={() => handlers.onAiSummary?.()}><article className="book-detail"><p className="book-detail-description">{state.aiSummary}</p></article></Sheet>}
       <StageHost stage={stage} />

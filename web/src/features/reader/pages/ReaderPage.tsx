@@ -30,6 +30,7 @@ export function ReaderPage() {
       ...(runtime.pageHost ? { pageHost: runtime.pageHost } : {}),
       ...(runtime.speechBridge ? { speechBridge: runtime.speechBridge } : {}),
       onBack: () => navigate(-1),
+      onOpenBook: id => navigate('/book/' + encodeURIComponent(id), { replace: true }),
       onSettingsChange: patch => { void runtime.updateSettings(patch); },
       onSignedOut: () => { void runtime.api.signOut(); },
     });

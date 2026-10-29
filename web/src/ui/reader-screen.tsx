@@ -65,6 +65,14 @@ export interface ReaderScreenOptions {
    */
   speechBridge?: NativeSpeechBridge;
   onBack(): void;
+  /**
+   * Opens another book in the same screen slot, for 丛书 volume hand-off.
+   *
+   * The host owns the route, so the URL has to move with the book: a volume
+   * opened by the reader's own `open()` would leave the address bar pointing at
+   * the previous one, and a reload would drop the reader back a volume.
+   */
+  onOpenBook?(bookId: string): void;
   onSettingsChange(patch: Partial<AppSettings>): void;
   onSignedOut(): void;
 }
@@ -294,6 +302,7 @@ export class ReaderScreen {
             onTocEntry: (ref) => void this.goToChapterRef(ref),
             onChapter: (delta) => void this.goToChapter(delta),
             onBookInfo: () => this.patch({ bookInfoOpen: !this.chrome.bookInfoOpen }),
+            onEditSeries: (series, index) => void this.saveSeries(series, index),
             onAiSummary: () => void this.generateAiSummary(),
             onRefresh: () => void this.refreshPublication(),
             onRefreshChapter: () => void this.refreshChapter(),
@@ -314,6 +323,19 @@ export class ReaderScreen {
           }}
         />
     ));
+  }
+
+  /** Save the book's 丛书名 + 编号, then refresh the chrome's own copy. */
+  private async saveSeries(series: string, index: number | null): Promise<void> {
+    if (!this.book) return;
+    try {
+      const book = await this.options.api.patchBookMetadata(this.book.id, { series: series.trim() || undefined, seriesIndex: index });
+      this.book = book;
+      this.patch({ series: book.series, seriesIndex: book.seriesIndex });
+      this.flashStatus('丛书标记已保存', 2000);
+    } catch (error) {
+      this.flashStatus(error instanceof Error ? error.message : '保存失败', 2400);
+    }
   }
 
   private async generateAiSummary(): Promise<void> {
@@ -337,7 +359,7 @@ export class ReaderScreen {
     const token = ++this.loadingToken;
     this.toolsOpen = false; this.annotation = null; this.toolsReturn = ''; this.toolsSelection = null; this.stopPreview();
     this.content = null; this.book = book;
-    this.patch({ title: book.title, author: book.author, description: book.description, bookInfoOpen: false, canRefresh: book.format === 'chapters', canSwitch: false, alternatives: null, refreshingChapter: false, sourceName: '', chapterUrl: '', toc: [] });
+    this.patch({ title: book.title, author: book.author, description: book.description, series: book.series, seriesIndex: book.seriesIndex, bookInfoOpen: false, canRefresh: book.format === 'chapters', canSwitch: false, alternatives: null, refreshingChapter: false, sourceName: '', chapterUrl: '', toc: [] });
     this.setStatus('loading', '正在载入…');
     this.setChromeVisible(true);
 
@@ -1189,6 +1211,10 @@ export class ReaderScreen {
       return;
     }
     if (!moved) {
+      if (direction === 'next' && this.atLastChapter()) {
+        const advanced = await this.openNextInSeries();
+        if (advanced) return;
+      }
       this.flashStatus(direction === 'next' ? '已经是最后一页' : '已经是第一页');
       return;
     }
@@ -1661,6 +1687,10 @@ export class ReaderScreen {
       return;
     }
     if (this.chapterCount > 0 && target >= this.chapterCount) {
+      if (delta === 1) {
+        const advanced = await this.openNextInSeries();
+        if (advanced) return;
+      }
       this.flashStatus('已经是最后一章', 1800);
       return;
     }
@@ -1681,6 +1711,37 @@ export class ReaderScreen {
    */
   private get chapterCount(): number {
     return this.content ? this.manifest?.content?.total ?? this.manifest?.total ?? this.doc?.sections.length ?? 0 : this.doc?.sections.length ?? 0;
+  }
+
+  /** True when the open chapter is the book's last one — see `chapterCount`. */
+  private atLastChapter(): boolean {
+    const view = this.view;
+    if (!view) return false;
+    const total = this.chapterCount;
+    return total > 0 && view.currentChapterPosition + 1 >= total;
+  }
+
+  /**
+   * 丛书自动切册：读完一册的最后一章，打开编号更大的下一册。
+   * The server lists every book of the 丛书 (the shelf's own `series` filter);
+   * the next volume is the one whose `seriesIndex` is the smallest number above
+   * this book's. `false` means there is no 丛书, or this is already the last
+   * volume, and the caller reports "已经是最后一章".
+   */
+  private async openNextInSeries(): Promise<boolean> {
+    const book = this.book;
+    if (!book || !book.series || book.seriesIndex == null) return false;
+    try {
+      const { items } = await this.options.api.listBooks({ series: book.series, pageSize: 200 });
+      const next = items
+        .filter((candidate) => candidate.seriesIndex != null && candidate.seriesIndex > book.seriesIndex!)
+        .sort((a, b) => a.seriesIndex! - b.seriesIndex!)[0];
+      if (!next) return false;
+      if (this.options.onOpenBook) { this.options.onOpenBook(next.id); return true; }
+      await this.open(next);
+      this.flashStatus(`已切到《${next.title}》`, 2500);
+      return true;
+    } catch { return false; }
   }
 
   /**
