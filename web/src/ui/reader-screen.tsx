@@ -72,7 +72,7 @@ export interface ReaderScreenOptions {
    * opened by the reader's own `open()` would leave the address bar pointing at
    * the previous one, and a reload would drop the reader back a volume.
    */
-  onOpenBook?(bookId: string): void;
+  onOpenBook?(bookId: string, section?: string): void;
   onSettingsChange(patch: Partial<AppSettings>): void;
   onSignedOut(): void;
 }
@@ -186,6 +186,16 @@ export class ReaderScreen {
   private content: BookContent | null = null;
   private book: Book | null = null;
   private manifest: Manifest | null = null;
+  /**
+   * The books of the open book's 丛书, in `seriesIndex` order, and the chapter
+   * lists already fetched for the volumes that are not the open one.
+   *
+   * Only 标题 are fetched (a manifest's item list), never the text: the reader
+   * still loads one volume's body at a time, which is what makes a 丛书 cheap to
+   * browse on a source that has to be scraped per chapter.
+   */
+  private seriesBooks: Book[] = [];
+  private seriesToc = new Map<string, ChromeTocEntry[]>();
   private chromeVisible = true;
   /**
    * True while a window is being fetched for a chapter jump.
@@ -300,6 +310,8 @@ export class ReaderScreen {
             onSpeakFromHere: () => void this.speakFromReaderPosition(),
             onSwitchEngine: (kind) => this.switchSpeechEngine(kind),
             onTocEntry: (ref) => void this.goToChapterRef(ref),
+            onExpandVolume: (bookId) => void this.expandVolume(bookId),
+            onSeriesChapter: (bookId, ref) => this.options.onOpenBook?.(bookId, ref),
             onChapter: (delta) => void this.goToChapter(delta),
             onBookInfo: () => this.patch({ bookInfoOpen: !this.chrome.bookInfoOpen }),
             onEditSeries: (series, index) => void this.saveSeries(series, index),
@@ -329,7 +341,7 @@ export class ReaderScreen {
   private async saveSeries(series: string, index: number | null): Promise<void> {
     if (!this.book) return;
     try {
-      const book = await this.options.api.patchBookMetadata(this.book.id, { series: series.trim() || undefined, seriesIndex: index });
+      const book = await this.options.api.patchBookMetadata(this.book.id, { series: series.trim(), seriesIndex: index });
       this.book = book;
       this.patch({ series: book.series, seriesIndex: book.seriesIndex });
       this.flashStatus('丛书标记已保存', 2000);
@@ -354,12 +366,16 @@ export class ReaderScreen {
   }
 
   /** Opens a book: fetch bytes, parse, restore position, start reporting. */
-  async open(book: Book): Promise<void> {
+  async open(book: Book, initialSection?: string): Promise<void> {
     this.closeAlternatives(); this.chapterRefresh?.abort(); this.chapterRefresh = null;
     const token = ++this.loadingToken;
     this.toolsOpen = false; this.annotation = null; this.toolsReturn = ''; this.toolsSelection = null; this.stopPreview();
     this.content = null; this.book = book;
-    this.patch({ title: book.title, author: book.author, description: book.description, series: book.series, seriesIndex: book.seriesIndex, bookInfoOpen: false, canRefresh: book.format === 'chapters', canSwitch: false, alternatives: null, refreshingChapter: false, sourceName: '', chapterUrl: '', toc: [] });
+    this.seriesBooks = []; this.seriesToc.clear();
+    this.patch({ bookId: book.id, title: book.title, author: book.author, description: book.description, series: book.series, seriesIndex: book.seriesIndex, bookInfoOpen: false, canRefresh: book.format === 'chapters', canSwitch: false, alternatives: null, refreshingChapter: false, sourceName: '', chapterUrl: '', toc: [] });
+    // Fire-and-forget: the volumes are a contents-panel nicety, and blocking the
+    // book's own first paint on a shelf query would delay the page the reader asked for.
+    if (book.series) void this.loadSeriesBooks(book);
     this.setStatus('loading', '正在载入…');
     this.setChromeVisible(true);
 
@@ -398,7 +414,7 @@ export class ReaderScreen {
         // meant that message was immediately replaced by nothing — so a reader
         // returning to a book saw no confirmation at all. The other order lets the
         // restore message overwrite "正在载入…", which is what it is there for.
-        await this.restorePosition(book, token);
+        await this.landOn(book, initialSection, token);
         if (this.chrome.statusState === 'loading') this.hideStatus();
         return;
       }
@@ -414,7 +430,7 @@ export class ReaderScreen {
       if (loaded.notes.length > 0) this.setStatus('idle', loaded.notes.join(' · '));
       else this.hideStatus();
 
-      await this.restorePosition(book, token);
+      await this.landOn(book, initialSection, token);
     } catch (err) {
       if (token !== this.loadingToken) return;
       this.handleLoadError(err);
@@ -1276,6 +1292,22 @@ export class ReaderScreen {
     void this.turnPage(forward ? 'next' : 'previous');
   }
 
+  /**
+   * Where the reader lands after a book finishes loading.
+   *
+   * A cross-volume jump names the exact chapter, and that beats the stored
+   * position: the saved locator belongs to the flow of the volume the reader
+   * came *from*, and restoring it here would silently ignore the chapter they
+   * tapped in the contents panel.
+   */
+  private async landOn(book: Book, initialSection: string | undefined, token: number): Promise<void> {
+    if (initialSection && token === this.loadingToken) {
+      await this.goToChapterRef(initialSection);
+      return;
+    }
+    await this.restorePosition(book, token);
+  }
+
   private async restorePosition(book: Book, token: number): Promise<void> {
     let latest = await this.options.offline.getProgress(book.id);
     try {
@@ -1474,38 +1506,82 @@ export class ReaderScreen {
    * which is worse but not useless, and never leaves the panel empty when the
    * book does have chapters.
    */
-  private async renderToc(): Promise<void> {
+  private async renderToc(force = false): Promise<void> {
     const book = this.book;
     if (!book) return;
-    if (!this.content && this.doc) {
-      this.patch({ toc: this.doc.toc.map(entry => ({ ...entry, spine: this.doc!.sections.findIndex(section => section.id === entry.id.split('#')[0]) })) });
-      return;
-    }
     // Fetched once per book. The panel is opened and closed constantly and the
     // TOC cannot change under a reader, so refetching it is a request per tap on
     // the ☰ button — which, on a NAS over a tunnel, is a visible pause before the
     // panel appears.
-    if (this.chrome.toc.length > 0) return;
+    if (!force && this.chrome.toc.length > 0) return;
+    const series = this.seriesBooks.length > 1;
+    // Inside a 丛书 the panel must list *every* chapter of the open volume, so it
+    // asks `/toc` for the whole book instead of reading the loaded window's items
+    // (which are one window's worth).
+    const own = await this.ownChapters(book, series);
+    // A 丛书 is one book to the reader: the panel lists every volume in
+    // `seriesIndex` order, and a tap on another volume's chapter switches books.
+    if (series) { this.patch({ toc: this.mergeSeriesToc(book, own) }); return; }
+    this.patch({ toc: own });
+  }
 
-    let entries: ChromeTocEntry[] = [];
-    if (book.format === 'chapters' && this.content) {
-      entries = this.content.items.map((item) => ({ id: item.href, label: item.title, depth: 0, spine: item.seq }));
-      this.patch({ toc: entries });
-      return;
+  /** The open book's own chapters, by the route that format publishes them on. */
+  private async ownChapters(book: Book, full = false): Promise<ChromeTocEntry[]> {
+    if (!this.content && this.doc) {
+      return this.doc.toc.map(entry => ({ ...entry, spine: this.doc!.sections.findIndex(section => section.id === entry.id.split('#')[0]) }));
+    }
+    if (!full && book.format === 'chapters' && this.content) {
+      return this.content.items.map((item) => ({ id: item.href, label: item.title, depth: 0, spine: item.seq }));
     }
     try {
       const toc = await this.options.api.toc(book.id);
-      entries = toc.map((entry) => ({
+      const entries = toc.map((entry) => ({
         id: entry.href,
         label: entry.title,
         depth: entry.level,
         ...(entry.spine !== undefined ? { spine: entry.spine } : {}),
       }));
-    } catch {
-      entries = this.view?.chapterLabels() ?? [];
+      if (entries.length > 0) return entries;
+    } catch { /* fall through to the window's own labels */ }
+    return this.view?.chapterLabels() ?? [];
+  }
+
+  /**
+   * The 丛书's whole contents: one header per volume in order, that volume's
+   * chapters underneath.
+   *
+   * Chapters of volumes that have not been opened are fetched only when the
+   * reader taps the header (`expandVolume`) — a 丛书 of twenty scraped volumes
+   * would otherwise be twenty manifest fetches before the panel could appear.
+   */
+  private mergeSeriesToc(book: Book, own: ChromeTocEntry[]): ChromeTocEntry[] {
+    const entries: ChromeTocEntry[] = [];
+    for (const volume of this.seriesBooks) {
+      const isOwn = volume.id === book.id;
+      const chapters = isOwn ? own : this.seriesToc.get(volume.id);
+      entries.push({
+        id: 'vol:' + volume.id,
+        label: `第 ${volume.seriesIndex ?? '?'} 册 · ${volume.title || '未命名'}`,
+        depth: 0,
+        group: true,
+        bookId: volume.id,
+        meta: chapters ? `${chapters.length} 章` : '点击展开',
+      });
+      if (chapters) for (const chapter of chapters) entries.push({ ...chapter, depth: 1, bookId: volume.id });
     }
-    if (entries.length === 0) entries = this.view?.chapterLabels() ?? [];
-    this.patch({ toc: entries });
+    return entries;
+  }
+
+  /** Loads one sibling volume's chapter list for the contents panel. */
+  private async expandVolume(bookId: string): Promise<void> {
+    if (this.seriesToc.has(bookId)) return;
+    try {
+      const toc = await this.options.api.toc(bookId);
+      this.seriesToc.set(bookId, toc.map((entry) => ({ id: entry.href, label: entry.title, depth: 0 })));
+      await this.renderToc(true);
+    } catch (error) {
+      this.flashStatus(error instanceof Error ? error.message : '这一册的目录读取失败', 3000);
+    }
   }
 
   /**
@@ -1719,6 +1795,23 @@ export class ReaderScreen {
     if (!view) return false;
     const total = this.chapterCount;
     return total > 0 && view.currentChapterPosition + 1 >= total;
+  }
+
+  /**
+   * Loads the 丛书's member books (titles only, no chapters yet) so the contents
+   * panel can list every volume in order.
+   */
+  private async loadSeriesBooks(book: Book): Promise<void> {
+    if (!book.series) { this.seriesBooks = []; return; }
+    try {
+      const { items } = await this.options.api.listBooks({ series: book.series, pageSize: 200 });
+      // A different book may have been opened while the shelf query was in flight.
+      if (this.book?.id !== book.id) return;
+      this.seriesBooks = items
+        .filter((candidate) => candidate.seriesIndex != null)
+        .sort((a, b) => a.seriesIndex! - b.seriesIndex!);
+      if (this.chrome.tocOpen && this.seriesBooks.length > 1) await this.renderToc(true);
+    } catch { this.seriesBooks = []; }
   }
 
   /**

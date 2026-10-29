@@ -43,6 +43,15 @@ export interface ChromeTocEntry {
   label: string;
   depth: number;
   spine?: number;
+  /**
+   * A 丛书 volume header: a divider the panel draws in bold and does not treat
+   * as a chapter. Tapping it loads that volume's chapter list.
+   */
+  group?: boolean;
+  /** Which 丛书 volume this row belongs to; a chapter of *another* volume switches books. */
+  bookId?: string;
+  /** Right-hand hint on a volume header, e.g. "12 章" or "点击展开". */
+  meta?: string;
 }
 
 export interface SpeechBarState {
@@ -89,6 +98,8 @@ export interface ChromeState {
   alternatives?: SourcePage | null;
   alternativesSearching?: boolean;
   bookInfoOpen?: boolean;
+  /** The open book's own id, so the contents panel can tell its own chapters from a sibling volume's. */
+  bookId?: string;
   description?: string;
   series?: string;
   seriesIndex?: number | null;
@@ -158,6 +169,10 @@ export interface ChromeHandlers {
   onSpeakFromHere(): void;
   onSwitchEngine(kind: AppSettings['ttsEngine']): void;
   onTocEntry(ref: string): void;
+  /** A 丛书 volume header was tapped: load that volume's chapters. */
+  onExpandVolume?(bookId: string): void;
+  /** A chapter of another 丛书 volume was tapped: switch books and jump there. */
+  onSeriesChapter?(bookId: string, ref: string): void;
   onChapter(delta: 1 | -1): void;
   onBookInfo?(): void;
   onEditSeries?(series: string, seriesIndex: number | null): void;
@@ -329,18 +344,33 @@ export function ReaderChrome({ state, stage, handlers, tools }: ReaderChromeProp
                 hiddenDepth = null;
                 const hasChildren = (state.toc[index + 1]?.depth ?? -1) > entry.depth;
                 if (hasChildren && collapsed.has(entry.id)) hiddenDepth = entry.depth;
-                const reachable = entry.spine !== undefined && entry.spine >= 0;
+                // A 丛书 volume divider: bold, not a chapter, taps to load that volume's list.
+                if (entry.group) {
+                  const own = !entry.bookId || entry.bookId === state.bookId;
+                  return (
+                    <li key={entry.id + index} className="toc-group" data-current={own ? 'true' : undefined}>
+                      <button type="button" className="toc-group-head" disabled={own} title={own ? '当前册' : '点击展开这一册的章节'} onClick={() => entry.bookId && handlers.onExpandVolume?.(entry.bookId)}>
+                        <span className="toc-group-label">{entry.label}</span>
+                        {entry.meta && <span className="toc-group-meta">{entry.meta}</span>}
+                      </button>
+                    </li>
+                  );
+                }
+                // A chapter of another volume: reachable (it switches books), so it must not
+                // wear the "not in this window" mark the current volume's far chapters carry.
+                const otherBook = entry.bookId && entry.bookId !== state.bookId ? entry.bookId : undefined;
+                const reachable = otherBook ? true : entry.spine !== undefined && entry.spine >= 0;
                 return (
                   <li key={entry.id + index} data-section={entry.id}>
                     {hasChildren && <button className="toc-collapse" aria-label={entry.label + (collapsed.has(entry.id) ? ' 展开' : ' 折叠')} aria-expanded={!collapsed.has(entry.id)} onClick={() => { const next = new Set(collapsed); if (next.has(entry.id)) next.delete(entry.id); else next.add(entry.id); setCollapsed(next); }}>{collapsed.has(entry.id) ? '+' : '−'}</button>}
                     <button
                       type="button"
-                      aria-current={entry.id.split('#')[0] === state.currentSectionId}
+                      aria-current={!otherBook && entry.id.split('#')[0] === state.currentSectionId}
                       data-unreachable={reachable ? undefined : 'true'}
                       disabled={!reachable}
                       title={reachable ? undefined : '这一章不在当前窗口中'}
                       style={entry.depth > 0 ? { paddingInlineStart: `${0.6 + entry.depth * 0.9}rem` } : undefined}
-                      onClick={() => handlers.onTocEntry(entry.id)}
+                      onClick={() => otherBook ? handlers.onSeriesChapter?.(otherBook, entry.id) : handlers.onTocEntry(entry.id)}
                     >
                       <span className="toc-index">{index + 1}</span>
                       <span className="toc-label">{entry.label}</span>

@@ -82,19 +82,27 @@ function SeriesCover({ url, fallback }: { url: string | null; fallback: string }
 export function SeriesCard({ books, showAuthor, onRemove }: { books: Book[]; showAuthor: boolean; onRemove?: (book: Book) => void }) {
   const [expanded, setExpanded] = useState(false);
   const first = books[0];
+  // The volume the reader is actually in: marked 在读 wins, else the most
+  // recently touched one. Tapping the card opens *that* volume, not the first,
+  // so "continue the 丛书" means continuing where they left off.
+  const current = books.find(book => book.readingState === 'reading')
+    ?? [...books].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0]
+    ?? first;
+  const progressLabel = current.seriesIndex != null ? `第 ${current.seriesIndex} 册 · ${current.title || '未命名'}` : current.title || '未命名';
   return <div className="book-card series-card" data-count={books.length} data-expanded={String(expanded)}>
     <button type="button" className="series-toggle" onClick={() => setExpanded(v => !v)} aria-expanded={expanded} aria-label={`展开 ${first.series}（${books.length} 册）`}>
       <span className="series-badge">📚 {books.length}</span>
     </button>
-    <Link className="book-open" aria-label={`${first.series} ${first.title}`.trim()} to={`/book/${encodeURIComponent(first.id)}`}>
+    <Link className="book-open" aria-label={`${first.series} ${progressLabel}`.trim()} to={`/book/${encodeURIComponent(current.id)}`}>
       <div className="cover">
         <SeriesCover url={first.coverUrl} fallback={first.series || '丛书'} />
         <span className="format-badge">{books.length} 册</span>
       </div>
       <div className="title">{first.series || '未命名丛书'}</div>
+      <div className="series-current">{progressLabel}</div>
       {showAuthor && <div className="author">{first.author || '未知作者'}</div>}
     </Link>
-    {expanded && <div className="series-list">{books.map(book => <div key={book.id} className="series-item"><span className="series-item-num">{book.seriesIndex ?? '·'}</span><Link to={`/book/${encodeURIComponent(book.id)}`}>{book.title || '未命名'}</Link>{'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}</div>)}</div>}
+    {expanded && <div className="series-list">{books.map(book => <div key={book.id} className="series-item" data-current={book.id === current.id ? 'true' : undefined}><span className="series-item-num">{book.seriesIndex ?? '·'}</span><Link to={`/book/${encodeURIComponent(book.id)}`}>{book.title || '未命名'}</Link>{'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}</div>)}</div>}
     {onRemove && <button type="button" className="book-more" aria-label={`${first.series} 的操作`} title="丛书操作" onClick={() => onRemove(first)}><MoreHorizontal size={17} aria-hidden="true" /></button>}
   </div>;
 }
@@ -189,8 +197,11 @@ export function ShelfPage() {
     try {
       for (let i = 0; i < editTarget.length; i++) {
         const book = editTarget[i];
-        const idx = editTarget.length === 1 ? (editIndex === '' ? undefined : Number(editIndex)) : (Number(editIndex) || 1) + i;
-        await runtime.api.patchBookMetadata(book.id, { series: editSeries.trim() || undefined, seriesIndex: idx });
+        // Send the blank string and a null index rather than dropping them: the
+        // server treats an empty override as the reader's explicit "no 丛书",
+        // and omitting the field would leave the old value in place.
+        const idx = editTarget.length === 1 ? (editIndex === '' ? null : Number(editIndex)) : (Number(editIndex) || 1) + i;
+        await runtime.api.patchBookMetadata(book.id, { series: editSeries.trim(), seriesIndex: idx });
       }
       setEditTarget(null);
       await queryClient.invalidateQueries({ queryKey: ['shelf'] });
