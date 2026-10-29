@@ -69,7 +69,7 @@ export function BookCard({ book, showAuthor, showProgress, onRemove, selecting, 
 const readingLabels: Record<ReadingState, string> = { reading: '在读', want: '想读', finished: '已读' };
 const readingStates = ['reading', 'want', 'finished'] as const;
 const isReadingState = (value: string | null): value is ReadingState => readingStates.includes(value as ReadingState);
-type BookAction = ReadingState | 'clear' | 'remove' | 'editSeries';
+type BookAction = ReadingState | 'clear' | 'remove' | 'editSeries' | 'clearSeries';
 
 /** A stack of same-series books collapsed into one shelf slot. */
 function SeriesCover({ url, fallback }: { url: string | null; fallback: string }) {
@@ -79,7 +79,7 @@ function SeriesCover({ url, fallback }: { url: string | null; fallback: string }
 }
 
 /** A stack of same-series books collapsed into one shelf slot. */
-export function SeriesCard({ books, showAuthor, onRemove }: { books: Book[]; showAuthor: boolean; onRemove?: (book: Book) => void }) {
+export function SeriesCard({ books, showAuthor, onRemove }: { books: Book[]; showAuthor: boolean; onRemove?: (books: Book[]) => void }) {
   const [expanded, setExpanded] = useState(false);
   const first = books[0];
   // The volume the reader is actually in: marked 在读 wins, else the most
@@ -103,7 +103,7 @@ export function SeriesCard({ books, showAuthor, onRemove }: { books: Book[]; sho
       {showAuthor && <div className="author">{first.author || '未知作者'}</div>}
     </Link>
     {expanded && <div className="series-list">{books.map(book => <div key={book.id} className="series-item" data-current={book.id === current.id ? 'true' : undefined}><span className="series-item-num">{book.seriesIndex ?? '·'}</span><Link to={`/book/${encodeURIComponent(book.id)}`}>{book.title || '未命名'}</Link>{'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}</div>)}</div>}
-    {onRemove && <button type="button" className="book-more" aria-label={`${first.series} 的操作`} title="丛书操作" onClick={() => onRemove(first)}><MoreHorizontal size={17} aria-hidden="true" /></button>}
+    {onRemove && <button type="button" className="book-more" aria-label={`${first.series} 的操作`} title="丛书操作" onClick={() => onRemove(books)}><MoreHorizontal size={17} aria-hidden="true" /></button>}
   </div>;
 }
 
@@ -119,7 +119,8 @@ export function ShelfPage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [opdsOpen, setOpdsOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<Book | ContinueReadingItem | null>(null);
-  const [menuTarget, setMenuTarget] = useState<Book | null>(null);
+  /** The books the ⋯ menu acts on: one for a plain card, the whole run for a 丛书. */
+  const [menuTarget, setMenuTarget] = useState<Book[] | null>(null);
   // Edit a book's 丛书名 + 编号; the value is a list of books (one for the single-card menu, many for batch tagging).
   const [editTarget, setEditTarget] = useState<Book[] | null>(null);
   const [editSeries, setEditSeries] = useState('');
@@ -176,21 +177,46 @@ export function ShelfPage() {
     go({ status: next });
     return true;
   });
-  const act = async (book: Book, action: BookAction) => {
+  const act = async (books: Book[], action: BookAction) => {
+    const book = books[0];
     if (action === 'remove') { setRemoveTarget(book); return; }
-    if (action === 'editSeries') { setEditTarget([book]); setEditSeries(book.series ?? ''); setEditIndex(book.seriesIndex != null ? String(book.seriesIndex) : ''); return; }
+    if (action === 'editSeries') {
+      setEditTarget(books);
+      setEditSeries(book.series ?? '');
+      setEditIndex(books.length === 1 && book.seriesIndex != null ? String(book.seriesIndex) : '');
+      return;
+    }
+    if (action === 'clearSeries') {
+      // Clearing the label on one book would leave a 丛书 that is now a different
+      // set; "取消丛书" has to mean every member.
+      setActionError('');
+      try {
+        for (const member of books) await runtime.api.patchBookMetadata(member.id, { series: '', seriesIndex: null });
+        await queryClient.invalidateQueries({ queryKey: ['shelf'] });
+      } catch (error) { setActionError(error instanceof Error ? error.message : '取消丛书失败，请稍后重试。'); }
+      return;
+    }
     setActionError('');
     try {
       await runtime.api.setReadingStatus(book.id, action === 'clear' ? null : action);
       await queryClient.invalidateQueries({ queryKey: ['shelf'] });
     } catch (error) { setActionError(error instanceof Error ? error.message : '标记失败，请稍后重试。'); }
   };
-  const menuOptions = (book: Book) => [
-    ...readingStates.filter(state => state !== book.readingState).map(state => ({ value: state, label: '标记为' + readingLabels[state] })),
-    ...(book.readingState ? [{ value: 'clear', label: '清除标记' }] : []),
-    { value: 'editSeries', label: '编辑丛书 / 编号' },
-    { value: 'remove', label: '从书架拿掉' },
-  ];
+  const menuOptions = (books: Book[]) => {
+    // A 丛书 is edited and cleared as a set: the card represents all of them.
+    if (books.length > 1) return [
+      { value: 'editSeries', label: `编辑整组丛书（${books.length} 册）` },
+      { value: 'clearSeries', label: '取消丛书（整组）' },
+    ];
+    const book = books[0];
+    return [
+      ...readingStates.filter(state => state !== book.readingState).map(state => ({ value: state, label: '标记为' + readingLabels[state] })),
+      ...(book.readingState ? [{ value: 'clear', label: '清除标记' }] : []),
+      { value: 'editSeries', label: '编辑丛书 / 编号' },
+      ...(book.series ? [{ value: 'clearSeries', label: '取消丛书' }] : []),
+      { value: 'remove', label: '从书架拿掉' },
+    ];
+  };
   const saveEditSeries = async () => {
     if (!editTarget) return;
     setActionError('');
@@ -268,12 +294,12 @@ export function ShelfPage() {
       {query.data && cards.length === 0 && filtered && !queryText && <div className="empty-state collection-empty"><BookOpen className="empty-glyph" aria-hidden="true" /><p>{status ? `还没有${readingLabels[status]}的书` : '这个分组里没有书'}</p><p className="muted">{status === 'want' ? '在书籍的“⋯”菜单里可以标记想读。' : '换一个分类，或查看全部书籍。'}</p><div className="empty-actions"><button type="button" className="button" onClick={clearFilters}>查看全部书籍</button></div></div>}
       {query.data && cards.length === 0 && !(filtered && !queryText) && <div className="empty-state collection-empty"><BookOpen className="empty-glyph" aria-hidden="true" /><p>{queryText ? '没有匹配的书' : '书架还没有书'}</p><p className="muted">{queryText ? '换个关键词，或者检查一下作者名的写法' : '从书库挑选喜欢的书，或通过书源搜索，加入书架后就能开始阅读。'}</p><div className="empty-actions">{queryText ? <button type="button" className="button" onClick={clearSearch}>清除搜索</button> : <><Link className="button primary" to="/sources"><Search size={16} />去搜书</Link><Link className="button" to="/library"><LibraryBig size={16} />打开书库</Link></>}</div></div>}
       {selectMode && <div className="shelf-batch-bar"><button type="button" className="chip" onClick={() => { const all = cards.map(b => (b as Book).id); const allSel = all.length > 0 && all.every(id => selected.has(id)); setSelected(allSel ? new Set() : new Set(all)); }}>{selected.size === cards.length && cards.length > 0 ? '取消全选' : '全选'}</button><span className="muted">已选 {selected.size}</span><button type="button" className="button primary" disabled={selected.size === 0} onClick={startBatchEdit}>标记为丛书</button></div>}
-      {folded.length > 0 && <div className="book-grid" data-density={settings.shelfDensity} data-show-author={String(settings.shelfShowAuthor)} data-show-progress={String(settings.shelfShowProgress)} data-selecting={String(selectMode)}>{selectMode ? cards.map(book => <BookCard key={book.id} book={book as Book} showAuthor={settings.shelfShowAuthor} showProgress={settings.shelfShowProgress} selecting selected={selected.has((book as Book).id)} onToggle={() => toggleSelect(book)} />) : folded.map(entry => 'id' in entry ? <BookCard key={entry.id} book={entry as Book} showAuthor={settings.shelfShowAuthor} showProgress={settings.shelfShowProgress} onRemove={() => setMenuTarget(entry as Book)} /> : <SeriesCard key={'s:' + entry.series[0].series} books={entry.series} showAuthor={settings.shelfShowAuthor} onRemove={book => setMenuTarget(book)} />)}</div>}
+      {folded.length > 0 && <div className="book-grid" data-density={settings.shelfDensity} data-show-author={String(settings.shelfShowAuthor)} data-show-progress={String(settings.shelfShowProgress)} data-selecting={String(selectMode)}>{selectMode ? cards.map(book => <BookCard key={book.id} book={book as Book} showAuthor={settings.shelfShowAuthor} showProgress={settings.shelfShowProgress} selecting selected={selected.has((book as Book).id)} onToggle={() => toggleSelect(book)} />) : folded.map(entry => 'id' in entry ? <BookCard key={entry.id} book={entry as Book} showAuthor={settings.shelfShowAuthor} showProgress={settings.shelfShowProgress} onRemove={() => setMenuTarget([entry as Book])} /> : <SeriesCard key={'s:' + entry.series[0].series} books={entry.series} showAuthor={settings.shelfShowAuthor} onRemove={list => setMenuTarget(list)} />)}</div>}
       {query.data && pages > 1 && <nav className="shelf-pager" aria-label="翻页"><button type="button" disabled={page <= 1} onClick={() => go({ page: page - 1 })}>上一页</button><span>{page} / {pages}</span><button type="button" disabled={page >= pages} onClick={() => go({ page: page + 1 })}>下一页</button></nav>}
     </section>
     {settingsOpen && <ShelfSettingsSheet settings={settings} onPatch={patch => { void runtime.updateSettings(patch); }} onClose={() => setSettingsOpen(false)} onOpenExternalReader={() => { setSettingsOpen(false); setOpdsOpen(true); }} />}
     {opdsOpen && <OpdsAccess api={runtime.api} onSignedOut={() => { void runtime.api.signOut(); }} onClose={() => { setOpdsOpen(false); setSettingsOpen(true); }} />}
-    {menuTarget && <DialogView dialog={{ kind: 'pick', title: `《${menuTarget.title || '未命名'}》`, options: menuOptions(menuTarget), resolve: (_value: string | null) => undefined } satisfies Dialog} destructive="从书架拿掉" onClose={answer => { const target = menuTarget; setMenuTarget(null); if (typeof answer === 'string' && answer) void act(target, answer as BookAction); }} />}
+    {menuTarget && <DialogView dialog={{ kind: 'pick', title: menuTarget.length > 1 ? `${menuTarget[0].series || '丛书'}（${menuTarget.length} 册）` : `《${menuTarget[0].title || '未命名'}》`, options: menuOptions(menuTarget), resolve: (_value: string | null) => undefined } satisfies Dialog} destructive={menuTarget.length > 1 ? '' : '从书架拿掉'} onClose={answer => { const target = menuTarget; setMenuTarget(null); if (typeof answer === 'string' && answer) void act(target, answer as BookAction); }} />}
     {groupsOpen && <DialogView dialog={{ kind: 'pick', title: groups.isPending ? '分组 · 正在读取…' : groups.error ? '分组 · 读取失败' : '分组', options: groupOptions, resolve: (_value: string | null) => undefined } satisfies Dialog} destructive="" onClose={answer => {
       setGroupsOpen(false);
       if (typeof answer !== 'string') return;
