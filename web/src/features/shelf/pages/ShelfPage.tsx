@@ -152,6 +152,15 @@ export function ShelfPage() {
   const [editTarget, setEditTarget] = useState<Book[] | null>(null);
   const [editSeries, setEditSeries] = useState('');
   const [editIndex, setEditIndex] = useState('');
+  /**
+   * `batch` labels a set of loose books; `manage` reorders and prunes an existing
+   * 丛书. Same dialog slot, different question: "which books join" versus "what
+   * order are these in, and is this one still part of it".
+   */
+  const [editMode, setEditMode] = useState<'batch' | 'manage'>('batch');
+  const [editOrder, setEditOrder] = useState<Book[]>([]);
+  const [editRemoved, setEditRemoved] = useState<Book[]>([]);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
   // Multi-select mode for batch tagging a 丛书.
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -210,7 +219,18 @@ export function ShelfPage() {
     if (action === 'editSeries') {
       setEditTarget(books);
       setEditSeries(book.series ?? '');
-      setEditIndex(books.length === 1 && book.seriesIndex != null ? String(book.seriesIndex) : '');
+      setEditRemoved([]);
+      if (books.length > 1) {
+        // An existing 丛书: the useful questions are "what order" and "is this
+        // one still in it", not "which books are joining".
+        setEditMode('manage');
+        setEditOrder([...books].sort((a, b) => (a.seriesIndex ?? 0) - (b.seriesIndex ?? 0)));
+        setEditIndex('');
+      } else {
+        setEditMode('batch');
+        setEditOrder([]);
+        setEditIndex(book.seriesIndex != null ? String(book.seriesIndex) : '');
+      }
       return;
     }
     if (action === 'clearSeries') {
@@ -260,6 +280,45 @@ export function ShelfPage() {
       await queryClient.invalidateQueries({ queryKey: ['shelf'] });
     } catch (error) { setActionError(error instanceof Error ? error.message : '保存失败，请稍后重试。'); }
   };
+
+  /** Reorders the 丛书 draft — one path for the drag handle and the ↑/↓ buttons. */
+  const moveInOrder = (from: number, to: number) => {
+    setEditOrder(list => {
+      if (from === to || from < 0 || to < 0 || from >= list.length || to >= list.length) return list;
+      const next = [...list];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+  };
+  const removeFromSeries = (book: Book) => {
+    setEditOrder(list => list.filter(item => item.id !== book.id));
+    setEditRemoved(list => list.some(item => item.id === book.id) ? list : [...list, book]);
+  };
+  const restoreToSeries = (book: Book) => {
+    setEditRemoved(list => list.filter(item => item.id !== book.id));
+    setEditOrder(list => list.some(item => item.id === book.id) ? list : [...list, book]);
+  };
+  /**
+   * Saves the managed 丛书: the removed books lose their label, the rest are
+   * renumbered 1..N in the order the reader put them in.
+   *
+   * Renumbering rather than keeping the old numbers is the point of the drag:
+   * the whole list is re-sequenced, so a gap left by a removed volume closes.
+   */
+  const saveManagedSeries = async () => {
+    if (!editTarget) return;
+    setActionError('');
+    try {
+      for (const book of editRemoved) await runtime.api.patchBookMetadata(book.id, { series: '', seriesIndex: null });
+      const name = editSeries.trim();
+      for (let i = 0; i < editOrder.length; i++) {
+        await runtime.api.patchBookMetadata(editOrder[i].id, { series: name, seriesIndex: i + 1 });
+      }
+      setEditTarget(null);
+      await queryClient.invalidateQueries({ queryKey: ['shelf'] });
+    } catch (error) { setActionError(error instanceof Error ? error.message : '保存失败，请稍后重试。'); }
+  };
   const groupOptions = [
     { value: '', label: '全部书籍' },
     ...(groups.data?.series ?? []).map(value => ({ value: 'series:' + value, label: '系列 · ' + value })),
@@ -278,6 +337,9 @@ export function ShelfPage() {
     const books = cards.filter(b => 'id' in b && selected.has((b as Book).id)) as Book[];
     if (books.length === 0) { setActionError('请先选中要标记的书。'); return; }
     setSelectMode(false);
+    setEditMode('batch');
+    setEditOrder([]);
+    setEditRemoved([]);
     setEditTarget(books);
     setEditSeries('');
     setEditIndex('1');
@@ -335,6 +397,33 @@ export function ShelfPage() {
       else if (answer.startsWith('tag:')) go({ tag: answer.slice(4), series: null });
     }} />}
     {removeTarget && <DialogView dialog={{ kind: 'confirm', title: '移出书架', body: `确定要将《${removeTarget.title}》移出书架吗？`, resolve: (_answer: boolean) => undefined } satisfies Dialog} destructive="移出书架" onClose={answer => { const target = removeTarget; setRemoveTarget(null); if (answer === true) void remove(target); }} />}
-    {editTarget && <Sheet title={editTarget.length === 1 ? `编辑丛书 · 《${editTarget[0].title}》` : `批量标记丛书（${editTarget.length} 本）`} onClose={() => setEditTarget(null)} footer={<><button type="button" className="button" onClick={() => setEditTarget(null)}>取消</button><button type="button" className="button primary" onClick={() => void saveEditSeries()}>保存</button></>}><div className="sheet-form"><div className="sheet-field"><label htmlFor="series-name">丛书名</label><input id="series-name" type="text" value={editSeries} onChange={e => setEditSeries(e.currentTarget.value)} placeholder="例如：三体" /></div><div className="sheet-field"><label htmlFor="series-index">编号</label><input id="series-index" type="number" min="1" step="1" value={editIndex} onChange={e => setEditIndex(e.currentTarget.value)} placeholder={editTarget.length > 1 ? '起始编号（自动递增）' : '例如：1'} /></div>{editTarget.length > 1 && <p className="sheet-text">将从第 {Number(editIndex) || 1} 号开始，按当前顺序递增分配。</p>}</div></Sheet>}
+    {editTarget && editMode === 'manage' && <Sheet title={`管理丛书 · ${editTarget[0].series || '未命名'}`} onClose={() => setEditTarget(null)} footer={<><button type="button" className="button" onClick={() => setEditTarget(null)}>取消</button><button type="button" className="button primary" onClick={() => void saveManagedSeries()}>保存</button></>}>
+      <div className="sheet-form">
+        <div className="sheet-field"><label htmlFor="manage-series-name">丛书名</label><input id="manage-series-name" type="text" value={editSeries} onChange={e => setEditSeries(e.currentTarget.value)} placeholder="例如：三体" /></div>
+      </div>
+      <h4 className="series-order-heading">册顺序<span className="muted">拖动或用箭头调整，保存后按新顺序重编号</span></h4>
+      <ul className="series-order">
+        {editOrder.map((book, index) => <li key={book.id} className="series-order-item" data-dragging={dragIndex === index ? 'true' : undefined}
+          draggable onDragStart={() => setDragIndex(index)} onDragEnd={() => setDragIndex(null)}
+          onDragOver={event => { event.preventDefault(); }} onDrop={event => { event.preventDefault(); if (dragIndex != null) moveInOrder(dragIndex, index); setDragIndex(null); }}>
+          <span className="series-order-num">{index + 1}</span>
+          <span className="series-order-title">{book.title || '未命名'}</span>
+          <button type="button" className="series-order-step" aria-label="上移" disabled={index === 0} onClick={() => moveInOrder(index, index - 1)}>↑</button>
+          <button type="button" className="series-order-step" aria-label="下移" disabled={index === editOrder.length - 1} onClick={() => moveInOrder(index, index + 1)}>↓</button>
+          <button type="button" className="series-order-remove" onClick={() => removeFromSeries(book)}>移出</button>
+        </li>)}
+      </ul>
+      {editOrder.length === 0 && <p className="sheet-text">这一组已经没有书了，保存后丛书会消失。</p>}
+      {editRemoved.length > 0 && <>
+        <h4 className="series-order-heading">将移出丛书<span className="muted">保存后恢复为普通书籍</span></h4>
+        <ul className="series-order">
+          {editRemoved.map(book => <li key={book.id} className="series-order-item is-removed">
+            <span className="series-order-title">{book.title || '未命名'}</span>
+            <button type="button" className="series-order-remove" onClick={() => restoreToSeries(book)}>放回</button>
+          </li>)}
+        </ul>
+      </>}
+    </Sheet>}
+    {editTarget && editMode === 'batch' && <Sheet title={editTarget.length === 1 ? `编辑丛书 · 《${editTarget[0].title}》` : `批量标记丛书（${editTarget.length} 本）`} onClose={() => setEditTarget(null)} footer={<><button type="button" className="button" onClick={() => setEditTarget(null)}>取消</button><button type="button" className="button primary" onClick={() => void saveEditSeries()}>保存</button></>}><div className="sheet-form"><div className="sheet-field"><label htmlFor="series-name">丛书名</label><input id="series-name" type="text" value={editSeries} onChange={e => setEditSeries(e.currentTarget.value)} placeholder="例如：三体" /></div><div className="sheet-field"><label htmlFor="series-index">编号</label><input id="series-index" type="number" min="1" step="1" value={editIndex} onChange={e => setEditIndex(e.currentTarget.value)} placeholder={editTarget.length > 1 ? '起始编号（自动递增）' : '例如：1'} /></div>{editTarget.length > 1 && <p className="sheet-text">将从第 {Number(editIndex) || 1} 号开始，按当前顺序递增分配。</p>}</div></Sheet>}
   </div>;
 }
