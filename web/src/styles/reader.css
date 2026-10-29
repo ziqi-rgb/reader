@@ -4200,7 +4200,8 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
   /* Left, because the ⋯ menu owns the top-right corner and a badge there made
      the card's only menu unreachable. */
   inset-inline-start: 0.35rem;
-  z-index: 2;
+  /* Above the volume overlay, so tapping it folds the list shut again. */
+  z-index: 4;
   width: 1.75rem; height: 1.75rem;
   display: grid; place-items: center;
   border: 0; border-radius: var(--radius-pill);
@@ -4229,13 +4230,25 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
 }
 .book-card.series-card[data-count] .book-open .cover { position: relative; z-index: 1; }
 
-/* Expanded volume list. */
+/* Expanded volume list: an overlay *inside* the card, never a block that grows
+   it. In flow it stretched the whole grid row, so opening one 丛书 shoved every
+   card below it out of place. */
 .book-card.series-card .series-list {
-  display: flex; flex-direction: column; gap: 0.2rem;
-  max-height: 0; overflow: hidden;
-  transition: max-height var(--motion-duration) var(--motion-ease);
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: none;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.4rem;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--reader-surface) 96%, transparent);
+  box-shadow: 0 2px 12px rgb(0 0 0 / 0.25);
+  backdrop-filter: blur(6px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
-.book-card.series-card[data-expanded='true'] .series-list { max-height: 20rem; }
+.book-card.series-card[data-expanded='true'] .series-list { display: flex; }
 .book-card.series-card .series-item {
   display: flex; align-items: center; gap: 0.4rem;
   padding: 0.3rem 0.4rem;
