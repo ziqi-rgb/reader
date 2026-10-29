@@ -2,8 +2,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { coverTint } from '../../../ui/cover-tint.ts';
 import { BookGridSkeleton } from '../../../ui/book-grid-skeleton.tsx';
 import { Link, useSearchParams } from 'react-router-dom';
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { BookOpen, LibraryBig, MoreHorizontal, Search } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { BookOpen, LibraryBig, Search } from 'lucide-react';
 import { Sheet } from '../../../ui/sheet.tsx';
 import type { Book, ContinueReadingItem, ReadingState } from '../../../api/types.ts';
 import { useRuntime } from '../../../app/providers/runtime-context.tsx';
@@ -17,6 +17,33 @@ import { FloatingNotice } from '../../../ui/floating-notice.tsx';
 import { useSwipeTabs } from '../../../shared/ui/use-swipe-tabs.ts';
 
 const coverCache = new WeakMap<object, Map<string, string>>();
+
+/**
+ * Opens a card's menu from a right-click, or from a long press on a touch screen.
+ *
+ * The ⋯ glyph that used to sit on the cover is gone: it shared the cover's top
+ * corner with the 丛书 stack badge and the reading-state chip, so on a stack card
+ * it was the badge that took the taps, leaving the card's only menu unreachable.
+ * The whole card is the target instead.
+ */
+function useCardMenu(onMenu?: () => void) {
+  const timer = useRef<number | null>(null);
+  const clear = () => { if (timer.current != null) { window.clearTimeout(timer.current); timer.current = null; } };
+  useEffect(() => clear, []);
+  if (!onMenu) return {};
+  return {
+    onContextMenu: (event: React.MouseEvent) => { event.preventDefault(); clear(); onMenu(); },
+    onPointerDown: (event: React.PointerEvent) => {
+      if (event.pointerType === 'mouse') return;
+      clear();
+      timer.current = window.setTimeout(() => { timer.current = null; onMenu(); }, 550);
+    },
+    onPointerUp: clear,
+    onPointerLeave: clear,
+    onPointerMove: clear,
+    onPointerCancel: clear,
+  };
+}
 export function useCover(api: ReturnType<typeof useRuntime>['api'], coverUrl: string | null | undefined): string | null {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
@@ -40,7 +67,8 @@ export function BookCard({ book, showAuthor, showProgress, onRemove, selecting, 
   const src = useCover(runtime.api, book.coverUrl);
   const progress = 'percentage' in book ? book.percentage : runtime.offline?.progressFor(book.id)?.percentage;
   const selectedCls = selecting && selected ? ' is-selected' : '';
-  return <div className={"book-card" + selectedCls} onClick={selecting ? onToggle : undefined} role={selecting ? "button" : undefined} tabIndex={selecting ? 0 : undefined} aria-pressed={selecting ? selected : undefined}
+  const menu = useCardMenu(selecting ? undefined : onRemove);
+  return <div className={"book-card" + selectedCls} {...menu} onClick={selecting ? onToggle : undefined} role={selecting ? "button" : undefined} tabIndex={selecting ? 0 : undefined} aria-pressed={selecting ? selected : undefined}
     onKeyDown={selecting ? (event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onToggle?.(); } }) : undefined}>
     {selecting
       ? <div className="book-open" aria-hidden="true">
@@ -62,7 +90,6 @@ export function BookCard({ book, showAuthor, showProgress, onRemove, selecting, 
         {showAuthor && <div className="author">{book.author || '未知作者'}</div>}
       </Link>}
     {'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}
-    {onRemove && !selecting && <button type="button" className="book-more" aria-label={`${book.title} 的操作`} title="书籍操作" onClick={e => { e.stopPropagation(); onRemove(); }}><MoreHorizontal size={17} aria-hidden="true" /></button>}
   </div>;
 }
 
@@ -89,7 +116,8 @@ export function SeriesCard({ books, showAuthor, onRemove }: { books: Book[]; sho
     ?? [...books].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0]
     ?? first;
   const progressLabel = current.seriesIndex != null ? `第 ${current.seriesIndex} 册 · ${current.title || '未命名'}` : current.title || '未命名';
-  return <div className="book-card series-card" data-count={books.length} data-expanded={String(expanded)}>
+  const menu = useCardMenu(onRemove ? () => onRemove(books) : undefined);
+  return <div className="book-card series-card" data-count={books.length} data-expanded={String(expanded)} {...menu}>
     <button type="button" className="series-toggle" onClick={() => setExpanded(v => !v)} aria-expanded={expanded} aria-label={`展开 ${first.series}（${books.length} 册）`}>
       <span className="series-badge">📚 {books.length}</span>
     </button>
@@ -103,7 +131,6 @@ export function SeriesCard({ books, showAuthor, onRemove }: { books: Book[]; sho
       {showAuthor && <div className="author">{first.author || '未知作者'}</div>}
     </Link>
     {expanded && <div className="series-list">{books.map(book => <div key={book.id} className="series-item" data-current={book.id === current.id ? 'true' : undefined}><span className="series-item-num">{book.seriesIndex ?? '·'}</span><Link to={`/book/${encodeURIComponent(book.id)}`}>{book.title || '未命名'}</Link>{'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}</div>)}</div>}
-    {onRemove && <button type="button" className="book-more" aria-label={`${first.series} 的操作`} title="丛书操作" onClick={() => onRemove(books)}><MoreHorizontal size={17} aria-hidden="true" /></button>}
   </div>;
 }
 

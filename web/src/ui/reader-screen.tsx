@@ -196,8 +196,8 @@ export class ReaderScreen {
    */
   private seriesBooks: Book[] = [];
   private seriesToc = new Map<string, ChromeTocEntry[]>();
-  /** Volumes the reader has folded shut in the contents panel. */
-  private collapsedVolumes = new Set<string>();
+  /** Volumes the reader has opened in the contents panel. Only the open volume starts open. */
+  private expandedVolumes = new Set<string>();
   /** In-flight member-list fetch, so the panel and the hand-off share one request. */
   private seriesPromise: Promise<Book[]> | null = null;
   private chromeVisible = true;
@@ -375,7 +375,7 @@ export class ReaderScreen {
     const token = ++this.loadingToken;
     this.toolsOpen = false; this.annotation = null; this.toolsReturn = ''; this.toolsSelection = null; this.stopPreview();
     this.content = null; this.book = book;
-    this.seriesBooks = []; this.seriesToc.clear(); this.seriesPromise = null; this.collapsedVolumes.clear();
+    this.seriesBooks = []; this.seriesToc.clear(); this.seriesPromise = null; this.expandedVolumes = new Set([book.id]);
     this.patch({ bookId: book.id, title: book.title, author: book.author, description: book.description, series: book.series, seriesIndex: book.seriesIndex, canPrevVolume: false, canNextVolume: false, bookInfoOpen: false, canRefresh: book.format === 'chapters', canSwitch: false, alternatives: null, refreshingChapter: false, sourceName: '', chapterUrl: '', toc: [] });
     // Fire-and-forget: the volumes are a contents-panel nicety, and blocking the
     // book's own first paint on a shelf query would delay the page the reader asked for.
@@ -1578,19 +1578,19 @@ export class ReaderScreen {
     for (const volume of this.seriesBooks) {
       const isOwn = volume.id === book.id;
       const chapters = isOwn ? own : this.seriesToc.get(volume.id);
-      const collapsed = this.collapsedVolumes.has(volume.id);
+      const open = this.expandedVolumes.has(volume.id);
       entries.push({
         id: 'vol:' + volume.id,
         label: `第 ${volume.seriesIndex ?? '?'} 册 · ${volume.title || '未命名'}`,
         depth: 0,
         group: true,
         bookId: volume.id,
-        collapsed,
-        meta: collapsed
-          ? (chapters ? `${chapters.length} 章 · 已收起` : '点击展开')
-          : (chapters ? `${chapters.length} 章` : '加载中…'),
+        collapsed: !open,
+        meta: open
+          ? (chapters ? `${chapters.length} 章` : '加载中…')
+          : (chapters ? `${chapters.length} 章 · 已收起` : '点击展开'),
       });
-      if (!collapsed && chapters) for (const chapter of chapters) entries.push({ ...chapter, depth: 1, bookId: volume.id });
+      if (open && chapters) for (const chapter of chapters) entries.push({ ...chapter, depth: 1, bookId: volume.id });
     }
     return entries;
   }
@@ -1872,19 +1872,20 @@ export class ReaderScreen {
    * names, then wants it out of the way again.
    */
   private async toggleVolume(bookId: string): Promise<void> {
-    if (this.collapsedVolumes.has(bookId)) {
-      this.collapsedVolumes.delete(bookId);
+    if (this.expandedVolumes.has(bookId)) {
+      this.expandedVolumes.delete(bookId);
+    } else {
+      this.expandedVolumes.add(bookId);
       // Unfolding a sibling nobody has fetched yet has to fetch it; the open
       // volume's chapters are already in hand.
       if (bookId !== this.book?.id) {
         try { await this.fetchVolumeToc(bookId); }
         catch (error) {
+          this.expandedVolumes.delete(bookId);
           this.flashStatus(error instanceof Error ? error.message : '这一册的目录读取失败', 3000);
           return;
         }
       }
-    } else {
-      this.collapsedVolumes.add(bookId);
     }
     await this.renderToc(true);
   }
@@ -1927,6 +1928,10 @@ export class ReaderScreen {
           && (direction === 1 ? candidate.seriesIndex > book.seriesIndex! : candidate.seriesIndex < book.seriesIndex!))
         .sort((a, b) => (direction === 1 ? a.seriesIndex! - b.seriesIndex! : b.seriesIndex! - a.seriesIndex!))[0];
       if (!target) return false;
+      // Persist this volume's position *before* leaving it. `dispose()` flushes
+      // too, but fire-and-forget: the route change unmounts the screen and the
+      // request can be torn down, which is how a volume's reading was lost.
+      await this.flushProgress().catch(() => undefined);
       // Backward has to name the last chapter: the new volume's stored position
       // belongs to a place the reader left, not to where this text continues.
       let section: string | undefined;

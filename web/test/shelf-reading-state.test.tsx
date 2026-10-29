@@ -53,15 +53,17 @@ it('filters by reading state and by one 分组, keeping both in the URL', async 
   expect(Object.fromEntries(new URLSearchParams(location))).toEqual({ sort: 'recent', page: '1', status: 'reading' });
 });
 
-it('shows a card\'s state and marks it from the ⋯ menu', async () => {
+it('shows a card\'s state and marks it from the context menu', async () => {
   paint('/shelf');
   expect(root.querySelector('.book-state')?.textContent).toBe('在读');
-  await act(() => root.querySelector<HTMLButtonElement>('.book-more')!.click());
+  // The menu lives on the card itself now: right-click (or a long press on touch).
+  const openMenu = () => act(() => root.querySelector('.book-card')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
+  await openMenu();
   const options = [...root.querySelectorAll('.sheet-list button')].map(button => button.textContent);
   expect(options).toEqual(['标记为想读', '标记为已读', '清除标记', '编辑丛书 / 编号', '从书架拿掉']);
   await click('标记为已读');
   expect(setReadingStatus).toHaveBeenCalledWith('b1', 'finished');
-  await act(() => root.querySelector<HTMLButtonElement>('.book-more')!.click());
+  await openMenu();
   await click('清除标记');
   expect(setReadingStatus).toHaveBeenLastCalledWith('b1', null);
 });
