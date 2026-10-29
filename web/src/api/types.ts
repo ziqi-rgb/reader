@@ -81,6 +81,13 @@ export interface Book {
    * once the book is read. `null`: not started and not marked.
    */
   readingState?: ReadingState | null;
+  /**
+   * When this reader last turned a page here, and how far in they are (shelf list
+   * only). A 丛书 card needs these to name the volume actually being read:
+   * `updatedAt` tracks the *file*, which a reading session never touches.
+   */
+  lastReadAt?: number | null;
+  percentage?: number;
 }
 
 export type ReadingState = 'reading' | 'want' | 'finished';

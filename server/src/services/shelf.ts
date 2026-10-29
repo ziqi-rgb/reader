@@ -56,6 +56,16 @@ export interface BookDto {
    * elsewhere, so a single-book lookup never reports a state it did not compute.
    */
   readingState?: ReadingState | null;
+  /**
+   * When this reader last turned a page here, and how far in they are.
+   *
+   * Also shelf-list only. A 丛书 card needs it to name the volume the reader is
+   * actually in: `updatedAt` is the *file's* timestamp and a reading session does
+   * not touch it, so ordering volumes by it picks whichever was replaced last
+   * rather than whichever was read last.
+   */
+  lastReadAt?: number | null;
+  percentage?: number;
 }
 
 interface BookRow {
@@ -66,6 +76,10 @@ interface BookRow {
   shelf_hidden?: number | null;
   /** READING_STATE, selected only by the shelf's own list. */
   reading_state?: ReadingState | null;
+  /** `reading_progress.updated_at` — when this reader last turned a page here. */
+  last_read_at?: number | null;
+  /** `reading_progress.percentage`, 0..1. */
+  percent?: number | null;
   identifier: string | null;
   content_hash: string;
   format: string;
@@ -292,7 +306,9 @@ export class ShelfService {
      * `hidden = 0` by construction, and a selected constant would become a field the
      * client reads as if it could say something.
      */
-    const shelfColumn = library ? ', ub.hidden AS shelf_hidden' : `, (${READING_STATE}) AS reading_state`;
+    const shelfColumn = library
+      ? ', ub.hidden AS shelf_hidden'
+      : `, (${READING_STATE}) AS reading_state, rp.updated_at AS last_read_at, rp.percentage AS percent`;
 
     const totalRow = this.db.get<{ n: number }>(
       `SELECT COUNT(*) AS n FROM books b ${join} WHERE ${whereSql}`,
@@ -406,6 +422,7 @@ export class ShelfService {
         ? {}
         : { shelfState: row.shelf_hidden === 0 ? ('on' as const) : ('off' as const) }),
       ...(row.reading_state === undefined ? {} : { readingState: row.reading_state }),
+      ...(row.last_read_at === undefined ? {} : { lastReadAt: row.last_read_at ?? null, percentage: row.percent ?? 0 }),
     };
   }
 

@@ -110,12 +110,22 @@ function SeriesCover({ url, fallback }: { url: string | null; fallback: string }
 export function SeriesCard({ books, showAuthor, onRemove, expandable = true }: { books: Book[]; showAuthor: boolean; onRemove?: (books: Book[]) => void; expandable?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const first = books[0];
-  // The volume the reader is actually in: marked 在读 wins, else the most
-  // recently touched one. Tapping the card opens *that* volume, not the first,
-  // so "continue the 丛书" means continuing where they left off.
-  const current = books.find(book => book.readingState === 'reading')
-    ?? [...books].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0]
-    ?? first;
+  // The volume the reader is actually in: most recently read wins, then the 在读
+  // mark, then the file's own timestamp.
+  //
+  // `find(readingState === 'reading')` used to decide this, which in a 丛书 where
+  // several volumes are marked 在读 simply returned the first one — so opening
+  // volume 2, quitting and refreshing still showed volume 1. Only
+  // `lastReadAt` (reading_progress.updated_at) records a reading session;
+  // `updatedAt` is the file's and a session never touches it.
+  const readTime = (book: Book) => book.lastReadAt ?? 0;
+  const current = [...books].sort((a, b) => {
+    const byRead = readTime(b) - readTime(a);
+    if (byRead !== 0) return byRead;
+    const byMark = Number(b.readingState === 'reading') - Number(a.readingState === 'reading');
+    if (byMark !== 0) return byMark;
+    return (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+  })[0] ?? first;
   const progressLabel = current.seriesIndex != null ? `第 ${current.seriesIndex} 册 · ${current.title || '未命名'}` : current.title || '未命名';
   const menu = useCardMenu(onRemove ? () => onRemove(books) : undefined);
   return <div className="book-card series-card" data-count={books.length} data-expanded={String(expandable && expanded)} {...menu}>
