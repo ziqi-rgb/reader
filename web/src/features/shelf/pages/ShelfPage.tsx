@@ -107,7 +107,7 @@ function SeriesCover({ url, fallback }: { url: string | null; fallback: string }
 }
 
 /** A stack of same-series books collapsed into one shelf slot. */
-export function SeriesCard({ books, showAuthor, onRemove }: { books: Book[]; showAuthor: boolean; onRemove?: (books: Book[]) => void }) {
+export function SeriesCard({ books, showAuthor, onRemove, expandable = true }: { books: Book[]; showAuthor: boolean; onRemove?: (books: Book[]) => void; expandable?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const first = books[0];
   // The volume the reader is actually in: marked 在读 wins, else the most
@@ -118,10 +118,10 @@ export function SeriesCard({ books, showAuthor, onRemove }: { books: Book[]; sho
     ?? first;
   const progressLabel = current.seriesIndex != null ? `第 ${current.seriesIndex} 册 · ${current.title || '未命名'}` : current.title || '未命名';
   const menu = useCardMenu(onRemove ? () => onRemove(books) : undefined);
-  return <div className="book-card series-card" data-count={books.length} data-expanded={String(expanded)} {...menu}>
-    <button type="button" className="series-toggle" onClick={() => setExpanded(v => !v)} aria-expanded={expanded} aria-label={`展开 ${first.series}（${books.length} 册）`}>
+  return <div className="book-card series-card" data-count={books.length} data-expanded={String(expandable && expanded)} {...menu}>
+    {expandable && <button type="button" className="series-toggle" onClick={() => setExpanded(v => !v)} aria-expanded={expanded} aria-label={`展开 ${first.series}（${books.length} 册）`}>
       <span className="series-badge">📚 {books.length}</span>
-    </button>
+    </button>}
     <Link className="book-open" aria-label={`${first.series} ${progressLabel}`.trim()} to={`/book/${encodeURIComponent(current.id)}`}>
       <div className="cover">
         <SeriesCover url={first.coverUrl} fallback={first.series || '丛书'} />
@@ -131,7 +131,7 @@ export function SeriesCard({ books, showAuthor, onRemove }: { books: Book[]; sho
       <div className="series-current">{progressLabel}</div>
       {showAuthor && <div className="author">{first.author || '未知作者'}</div>}
     </Link>
-    {expanded && <div className="series-list">{books.map(book => <div key={book.id} className="series-item" data-current={book.id === current.id ? 'true' : undefined}><span className="series-item-lead"><span className="series-item-num">{book.seriesIndex ?? '·'}</span>{'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}</span><Link to={`/book/${encodeURIComponent(book.id)}`}>{book.title || '未命名'}</Link></div>)}</div>}
+    {expandable && expanded && <div className="series-list">{books.map(book => <div key={book.id} className="series-item" data-current={book.id === current.id ? 'true' : undefined}><span className="series-item-lead"><span className="series-item-num">{book.seriesIndex ?? '·'}</span>{'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}</span><Link to={`/book/${encodeURIComponent(book.id)}`}>{book.title || '未命名'}</Link></div>)}</div>}
   </div>;
 }
 

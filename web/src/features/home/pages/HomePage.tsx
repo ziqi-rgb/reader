@@ -27,14 +27,22 @@ export function activityProgress(activity: Activity): number {
   return length > 0 && activity.position !== undefined ? Math.max(0, Math.min(1, (activity.position - activity.start) / length)) : 0;
 }
 
-function Resume({ book }: { book: ContinueReadingItem }) {
+function Resume({ book, seriesCount }: { book: ContinueReadingItem; seriesCount: number }) {
   const runtime = useRuntime();
   const src = useCover(runtime.api, book.coverUrl);
   const percent = Math.round(Math.max(0, Math.min(1, book.percentage)) * 100);
-  return <Link className="home-hero" to={`/book/${encodeURIComponent(book.id)}`} aria-label={`继续阅读 ${book.title}`}>
+  // A 丛书 is one book to the reader, so the hero names the 丛书 and lets the
+  // volume they left off in be the subtitle — the shelf already draws it that way.
+  const series = book.series || '';
+  const title = series || book.title || '未命名';
+  const meta = series
+    ? `第 ${book.seriesIndex ?? '?'} 册${seriesCount > 1 ? ` · 共 ${seriesCount} 册` : ''} · ${book.title || '未命名'}`
+    : '';
+  return <Link className="home-hero" to={`/book/${encodeURIComponent(book.id)}`} aria-label={`继续阅读 ${title}`}>
     <span className="home-hero-cover" aria-hidden="true">{src ? <img src={src} alt="" /> : <b>{book.title}</b>}</span>
     <span className="home-hero-text">
-      <strong>{book.title || '未命名'}</strong>
+      <strong>{title}</strong>
+      {meta && <small>{meta}</small>}
       {book.chapterTitle && <small>{book.chapterTitle}</small>}
       <span className="home-hero-foot">
         <span className="home-hero-action"><Play size={14} fill="currentColor" aria-hidden="true" />继续阅读</span>
@@ -82,13 +90,16 @@ export function HomePage() {
   const unfinished = (items?: Activity[]) => items?.find(item => !item.completed);
   const book = reading.data?.[0];
   const videoActivity = unfinished(video.data?.items), audioActivity = unfinished(audio.data?.items);
-  const books = useMemo(() => foldSeries((shelf.data?.items ?? []).slice(0, 8)), [shelf.data]);
+  const shelfItems = shelf.data?.items ?? [];
+  const books = useMemo(() => foldSeries(shelfItems.slice(0, 8)), [shelf.data]);
+  // How many volumes the 丛书 the reader left off in has, for the hero's subtitle.
+  const seriesCount = book?.series ? shelfItems.filter(item => item.series === book.series).length : 0;
   const name = user?.displayName || user?.username || '';
   return <div className="media-screen media-page home-page">
     <header className="home-header"><h1>{greeting(new Date().getHours())}{name ? `，${name}` : ''}</h1><p>从上次停下的地方继续</p></header>
     <div className="home-continue" data-media={videoActivity || audioActivity ? 'true' : undefined}>
       {book
-        ? <Resume book={book} />
+        ? <Resume book={book} seriesCount={seriesCount} />
         : <section className="home-empty" aria-label="继续阅读"><strong>还没有在读的书</strong><Link to="/shelf">去书架挑一本<ChevronRight size={16} aria-hidden="true" /></Link></section>}
       {(videoActivity || audioActivity) && <div className="home-cards">
         {videoActivity && <ResumeMedia channel="video" label="影视" icon={Clapperboard} activity={videoActivity} />}
@@ -99,7 +110,7 @@ export function HomePage() {
       <div className="home-section"><h2>我的书架</h2><Link to="/shelf">全部<ChevronRight size={16} aria-hidden="true" /></Link></div>
       <div className="home-shelf-row">{books.map(entry => 'id' in entry
         ? <BookCard key={entry.id} book={entry} showAuthor={false} showProgress />
-        : <SeriesCard key={'s:' + entry.series[0].series} books={entry.series} showAuthor={false} />)}</div>
+        : <SeriesCard key={'s:' + entry.series[0].series} books={entry.series} showAuthor={false} expandable={false} />)}</div>
     </section>}
   </div>;
 }
