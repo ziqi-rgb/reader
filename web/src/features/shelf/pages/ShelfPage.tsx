@@ -213,6 +213,22 @@ export function ShelfPage() {
     go({ status: next });
     return true;
   });
+  /**
+   * Refreshes everything a 丛书 edit can change.
+   *
+   * `['shelf']` alone is not enough: the 分组 dropdown reads `['shelf-groups']`
+   * and the home rail reads `['home']`, and neither key starts with `shelf`, so
+   * the prefix match skips them — the rows would update while the facet list and
+   * the "continue reading" strip kept the old 丛书.
+   */
+  const refreshShelf = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['shelf'] }),
+      queryClient.invalidateQueries({ queryKey: ['shelf-groups'] }),
+      queryClient.invalidateQueries({ queryKey: ['home'] }),
+    ]);
+  };
+
   const act = async (books: Book[], action: BookAction) => {
     const book = books[0];
     if (action === 'remove') { setRemoveTarget(book); return; }
@@ -239,14 +255,14 @@ export function ShelfPage() {
       setActionError('');
       try {
         for (const member of books) await runtime.api.patchBookMetadata(member.id, { series: '', seriesIndex: null });
-        await queryClient.invalidateQueries({ queryKey: ['shelf'] });
+        await refreshShelf();
       } catch (error) { setActionError(error instanceof Error ? error.message : '取消丛书失败，请稍后重试。'); }
       return;
     }
     setActionError('');
     try {
       await runtime.api.setReadingStatus(book.id, action === 'clear' ? null : action);
-      await queryClient.invalidateQueries({ queryKey: ['shelf'] });
+      await refreshShelf();
     } catch (error) { setActionError(error instanceof Error ? error.message : '标记失败，请稍后重试。'); }
   };
   const menuOptions = (books: Book[]) => {
@@ -277,7 +293,7 @@ export function ShelfPage() {
         await runtime.api.patchBookMetadata(book.id, { series: editSeries.trim(), seriesIndex: idx });
       }
       setEditTarget(null);
-      await queryClient.invalidateQueries({ queryKey: ['shelf'] });
+      await refreshShelf();
     } catch (error) { setActionError(error instanceof Error ? error.message : '保存失败，请稍后重试。'); }
   };
 
@@ -316,7 +332,7 @@ export function ShelfPage() {
         await runtime.api.patchBookMetadata(editOrder[i].id, { series: name, seriesIndex: i + 1 });
       }
       setEditTarget(null);
-      await queryClient.invalidateQueries({ queryKey: ['shelf'] });
+      await refreshShelf();
     } catch (error) { setActionError(error instanceof Error ? error.message : '保存失败，请稍后重试。'); }
   };
   const groupOptions = [
@@ -345,7 +361,7 @@ export function ShelfPage() {
     setEditIndex('1');
   };
   const groupLabel = series ? '系列 · ' + series : tag ? '标签 · ' + tag : '';
-  const remove = async (book: Book | ContinueReadingItem) => { await runtime.api.browseBatchShelf({ bookIds: [book.id] }, 'remove'); await queryClient.invalidateQueries({ queryKey: ['shelf'] }); };
+  const remove = async (book: Book | ContinueReadingItem) => { await runtime.api.browseBatchShelf({ bookIds: [book.id] }, 'remove'); await refreshShelf(); };
   const subtitle = queryText ? (query.data?.total ? `「${queryText}」匹配 ${query.data.total} 本` : `没有匹配「${queryText}」的书`) : '收藏好书，随时接着读'; // count and sort live in the sticky toolbar below; saying them twice is noise
   const densityLabel = settings.shelfDensity === 'compact' ? '紧凑' : settings.shelfDensity === 'comfortable' ? '宽松' : '适中';
   return <div ref={swipe} id="shelf-scroll" className="shelf shelf-screen">
