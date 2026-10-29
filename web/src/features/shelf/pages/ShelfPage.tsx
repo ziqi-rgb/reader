@@ -40,7 +40,8 @@ export function BookCard({ book, showAuthor, showProgress, onRemove, selecting, 
   const src = useCover(runtime.api, book.coverUrl);
   const progress = 'percentage' in book ? book.percentage : runtime.offline?.progressFor(book.id)?.percentage;
   const selectedCls = selecting && selected ? ' is-selected' : '';
-  return <div className={"book-card" + selectedCls} onClick={selecting ? onToggle : undefined} role={selecting ? "button" : undefined} aria-pressed={selecting ? selected : undefined}>
+  return <div className={"book-card" + selectedCls} onClick={selecting ? onToggle : undefined} role={selecting ? "button" : undefined} tabIndex={selecting ? 0 : undefined} aria-pressed={selecting ? selected : undefined}
+    onKeyDown={selecting ? (event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onToggle?.(); } }) : undefined}>
     {selecting
       ? <div className="book-open" aria-hidden="true">
         <div className="cover">
