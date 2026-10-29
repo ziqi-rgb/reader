@@ -4160,3 +4160,98 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
   pointer-events: none;
 }
 .book-card .book-state[data-state='finished'] { background: var(--color-surface-2); color: var(--reader-muted); }
+
+/* ── Series (stacked) card ────────────────────────────────────────────────
+   A group of same-series books collapsed into one shelf slot. The cover looks
+   like a small stack (a fanned edge behind the front cover); tapping the count
+   badge fans the list out so the reader can pick a volume without leaving the
+   shelf. */
+.book-card.series-card { position: relative; }
+.book-card.series-card .cover { box-shadow: 0 1px 2px rgb(0 0 0 / 0.14), 0 3px 10px rgb(0 0 0 / 0.06), 4px 4px 0 0 color-mix(in srgb, var(--reader-line) 60%, transparent), 8px 8px 0 0 color-mix(in srgb, var(--reader-line) 35%, transparent); }
+.book-card.series-card .series-toggle {
+  position: absolute;
+  inset-block-start: 0.35rem;
+  inset-inline-end: 0.35rem;
+  z-index: 2;
+  width: 1.75rem; height: 1.75rem;
+  display: grid; place-items: center;
+  border: 0; border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--reader-accent) 90%, transparent);
+  color: #fff; font: inherit; font-size: var(--text-meta); font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.2);
+  opacity: 0.9;
+}
+.book-card.series-card .series-toggle:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) {
+  .book-card.series-card .series-toggle:hover { opacity: 1; transform: scale(1.06); }
+}
+/* Fanned edge hint behind the cover, drawn as a pseudo-element on the card. */
+.book-card.series-card[data-count]::before {
+  content: '';
+  position: absolute;
+  inset-block-start: 0.55rem;
+  inset-inline-start: 0.35rem;
+  inset-inline-end: 0.35rem;
+  aspect-ratio: 2 / 3;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--reader-line) 55%, transparent);
+  z-index: 0;
+  pointer-events: none;
+}
+.book-card.series-card[data-count] .book-open .cover { position: relative; z-index: 1; }
+
+/* Expanded volume list. */
+.book-card.series-card .series-list {
+  display: flex; flex-direction: column; gap: 0.2rem;
+  max-height: 0; overflow: hidden;
+  transition: max-height var(--motion-duration) var(--motion-ease);
+}
+.book-card.series-card[data-expanded='true'] .series-list { max-height: 20rem; }
+.book-card.series-card .series-item {
+  display: flex; align-items: center; gap: 0.4rem;
+  padding: 0.3rem 0.4rem;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--reader-line) 30%, transparent);
+  font-size: var(--text-label);
+}
+.book-card.series-card .series-item-num {
+  flex: none; min-width: 1.2rem; text-align: center;
+  font-weight: 600; color: var(--reader-accent);
+  font-variant-numeric: tabular-nums;
+}
+.book-card.series-card .series-item > a { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--reader-ink); text-decoration: none; }
+.book-card.series-card .series-item .book-state { position: static; flex: none; }
+
+/* ── Batch selection ──────────────────────────────────────────────────────
+   A card the reader is choosing for a batch action (marking a 丛书). */
+.book-card.is-selected { outline: 2px solid var(--reader-accent); outline-offset: 2px; }
+.book-card .select-check {
+  position: absolute;
+  inset-block-start: 0.35rem;
+  inset-inline-start: 0.35rem;
+  z-index: 2;
+  display: none;
+  width: 1.4rem; height: 1.4rem;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--reader-accent);
+  color: #fff;
+  font-size: 0.9rem;
+  font-weight: 700;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.25);
+}
+.book-card.is-selected .select-check { display: grid; }
+
+/* The floating action bar shown while picking books for a batch. */
+.shelf-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-2);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--reader-accent) 10%, transparent);
+}
+.shelf-batch-bar .button { min-width: auto; min-height: 2.2rem; }

@@ -457,6 +457,15 @@ export class ReaderApi {
   async saveReadingOverrides(id: string, value: ReadingOverrides): Promise<ReadingOverrides> { return this.call('/api/v1/books/' + encodeURIComponent(id) + '/reading-overrides','PUT',value); }
   async undoReadingOverrides(id: string, version: number): Promise<ReadingOverrides> { return this.call('/api/v1/books/' + encodeURIComponent(id) + '/reading-overrides/undo','POST',{version}); }
 
+  /**
+   * Manual metadata completion: edit a book's title/author/series/seriesIndex/...
+   * The server records it in `metadata_overrides`, never overwritten by a rescan.
+   */
+  async patchBookMetadata(id: string, fields: Record<string, unknown>): Promise<Book> {
+    const result = await this.call<{ book: Book }>('/api/v1/books/' + encodeURIComponent(id) + '/metadata', 'PATCH', fields);
+    return result.book;
+  }
+
   async testSpeech(voice: string, speed: number, options: RequestOptions = {}): Promise<{ bytes: number; contentType: string; elapsedMs: number }> {
     return this.call('/api/v1/tts/test', 'POST', { voice, speed }, options);
   }

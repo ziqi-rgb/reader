@@ -4,6 +4,7 @@ import { BookGridSkeleton } from '../../../ui/book-grid-skeleton.tsx';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { BookOpen, LibraryBig, MoreHorizontal, Search } from 'lucide-react';
+import { Sheet } from '../../../ui/sheet.tsx';
 import type { Book, ContinueReadingItem, ReadingState } from '../../../api/types.ts';
 import { useRuntime } from '../../../app/providers/runtime-context.tsx';
 import { useSettingsStore } from '../../../shared/stores/settings.store.ts';
@@ -34,29 +35,68 @@ export function useCover(api: ReturnType<typeof useRuntime>['api'], coverUrl: st
   return src;
 }
 
-export function BookCard({ book, showAuthor, showProgress, onRemove }: { book: Book | ContinueReadingItem; showAuthor: boolean; showProgress: boolean; onRemove?: () => void }) {
+export function BookCard({ book, showAuthor, showProgress, onRemove, selecting, selected, onToggle }: { book: Book | ContinueReadingItem; showAuthor: boolean; showProgress: boolean; onRemove?: () => void; selecting?: boolean; selected?: boolean; onToggle?: () => void }) {
   const runtime = useRuntime();
   const src = useCover(runtime.api, book.coverUrl);
   const progress = 'percentage' in book ? book.percentage : runtime.offline?.progressFor(book.id)?.percentage;
-  return <div className="book-card">
-    <Link className="book-open" aria-label={`${book.title} ${book.author ?? ''}`.trim()} to={`/book/${encodeURIComponent(book.id)}`}>
-      <div className="cover">
-        {src ? <img src={src} alt="" loading="lazy" /> : <div className="placeholder" style={coverTint(book.title || '')}>{book.title || '无封面'}</div>}
-        <span className="format-badge">{book.format || '书籍'}</span>
-        {showProgress && progress !== undefined && progress > 0 && <div className="cover-progress"><span style={{ width: `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%` }} /></div>}
+  const selectedCls = selecting && selected ? ' is-selected' : '';
+  return <div className={"book-card" + selectedCls} onClick={selecting ? onToggle : undefined} role={selecting ? "button" : undefined} aria-pressed={selecting ? selected : undefined}>
+    {selecting
+      ? <div className="book-open" aria-hidden="true">
+        <div className="cover">
+          {src ? <img src={src} alt="" loading="lazy" /> : <div className="placeholder" style={coverTint(book.title || '')}>{book.title || '无封面'}</div>}
+          <span className="format-badge">{book.format || '书籍'}</span>
+          <span className="select-check" aria-hidden="true">✓</span>
+        </div>
+        <div className="title">{book.title || '未命名'}</div>
+        {showAuthor && <div className="author">{book.author || '未知作者'}</div>}
       </div>
-      <div className="title">{book.title || '未命名'}</div>
-      {showAuthor && <div className="author">{book.author || '未知作者'}</div>}
-    </Link>
+      : <Link className="book-open" aria-label={`${book.title} ${book.author ?? ''}`.trim()} to={`/book/${encodeURIComponent(book.id)}`}>
+        <div className="cover">
+          {src ? <img src={src} alt="" loading="lazy" /> : <div className="placeholder" style={coverTint(book.title || '')}>{book.title || '无封面'}</div>}
+          <span className="format-badge">{book.format || '书籍'}</span>
+          {showProgress && progress !== undefined && progress > 0 && <div className="cover-progress"><span style={{ width: `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%` }} /></div>}
+        </div>
+        <div className="title">{book.title || '未命名'}</div>
+        {showAuthor && <div className="author">{book.author || '未知作者'}</div>}
+      </Link>}
     {'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}
-    {onRemove && <button type="button" className="book-more" aria-label={`${book.title} 的操作`} title="书籍操作" onClick={onRemove}><MoreHorizontal size={17} aria-hidden="true" /></button>}
+    {onRemove && !selecting && <button type="button" className="book-more" aria-label={`${book.title} 的操作`} title="书籍操作" onClick={e => { e.stopPropagation(); onRemove(); }}><MoreHorizontal size={17} aria-hidden="true" /></button>}
   </div>;
 }
 
 const readingLabels: Record<ReadingState, string> = { reading: '在读', want: '想读', finished: '已读' };
 const readingStates = ['reading', 'want', 'finished'] as const;
 const isReadingState = (value: string | null): value is ReadingState => readingStates.includes(value as ReadingState);
-type BookAction = ReadingState | 'clear' | 'remove';
+type BookAction = ReadingState | 'clear' | 'remove' | 'editSeries';
+
+/** A stack of same-series books collapsed into one shelf slot. */
+function SeriesCover({ url, fallback }: { url: string | null; fallback: string }) {
+  const runtime = useRuntime();
+  const src = useCover(runtime.api, url);
+  return src ? <img src={src} alt="" loading="lazy" /> : <div className="placeholder" style={coverTint(fallback)}>{fallback || '无封面'}</div>;
+}
+
+/** A stack of same-series books collapsed into one shelf slot. */
+export function SeriesCard({ books, showAuthor, onRemove }: { books: Book[]; showAuthor: boolean; onRemove?: (book: Book) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const first = books[0];
+  return <div className="book-card series-card" data-count={books.length} data-expanded={String(expanded)}>
+    <button type="button" className="series-toggle" onClick={() => setExpanded(v => !v)} aria-expanded={expanded} aria-label={`展开 ${first.series}（${books.length} 册）`}>
+      <span className="series-badge">📚 {books.length}</span>
+    </button>
+    <Link className="book-open" aria-label={`${first.series} ${first.title}`.trim()} to={`/book/${encodeURIComponent(first.id)}`}>
+      <div className="cover">
+        <SeriesCover url={first.coverUrl} fallback={first.series || '丛书'} />
+        <span className="format-badge">{books.length} 册</span>
+      </div>
+      <div className="title">{first.series || '未命名丛书'}</div>
+      {showAuthor && <div className="author">{first.author || '未知作者'}</div>}
+    </Link>
+    {expanded && <div className="series-list">{books.map(book => <div key={book.id} className="series-item"><span className="series-item-num">{book.seriesIndex ?? '·'}</span><Link to={`/book/${encodeURIComponent(book.id)}`}>{book.title || '未命名'}</Link>{'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}</div>)}</div>}
+    {onRemove && <button type="button" className="book-more" aria-label={`${first.series} 的操作`} title="丛书操作" onClick={() => onRemove(first)}><MoreHorizontal size={17} aria-hidden="true" /></button>}
+  </div>;
+}
 
 export function ShelfPage() {
   const runtime = useRuntime();
@@ -71,6 +111,13 @@ export function ShelfPage() {
   const [opdsOpen, setOpdsOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<Book | ContinueReadingItem | null>(null);
   const [menuTarget, setMenuTarget] = useState<Book | null>(null);
+  // Edit a book's 丛书名 + 编号; the value is a list of books (one for the single-card menu, many for batch tagging).
+  const [editTarget, setEditTarget] = useState<Book[] | null>(null);
+  const [editSeries, setEditSeries] = useState('');
+  const [editIndex, setEditIndex] = useState('');
+  // Multi-select mode for batch tagging a 丛书.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [groupsOpen, setGroupsOpen] = useState(false);
   const [actionError, setActionError] = useState('');
   // 在读 / 想读 / 已读 and one 分组 (a series or a tag), all in the URL like the page and sort.
@@ -82,6 +129,25 @@ export function ShelfPage() {
   const query = useShelf(page, sort, queryText, filters);
   const pages = query.data ? Math.max(1, Math.ceil(query.data.total / query.data.pageSize)) : 1;
   const cards = useMemo(() => query.data?.items ?? [], [query.data]);
+  // Fold same-series books (≥2) into a single stacked card, keeping shelf order.
+  const folded = useMemo(() => {
+    const bySeries = new Map<string, Book[]>();
+    for (const item of cards) {
+      if ('series' in item && item.series) {
+        const list = bySeries.get(item.series) ?? [];
+        list.push(item);
+        bySeries.set(item.series, list);
+      }
+    }
+    const out: (Book | ContinueReadingItem | { series: Book[] })[] = [];
+    const emitted = new Set<string>();
+    for (const item of cards) {
+      if ('series' in item && item.series && (bySeries.get(item.series)?.length ?? 0) > 1) {
+        if (!emitted.has(item.series)) { out.push({ series: [...bySeries.get(item.series)!].sort((a, b) => (a.seriesIndex ?? 0) - (b.seriesIndex ?? 0)) }); emitted.add(item.series); }
+      } else out.push(item);
+    }
+    return out;
+  }, [cards]);
   useEffect(() => { void runtime.updateSettings({ shelfSort: sort }); }, [runtime, sort]);
   // Every navigation keeps what it does not change; a new filter or query starts at page 1.
   const go = (next: { q?: string; sort?: typeof sort; page?: number; status?: ReadingState | null; series?: string | null; tag?: string | null }) => {
@@ -103,6 +169,7 @@ export function ShelfPage() {
   });
   const act = async (book: Book, action: BookAction) => {
     if (action === 'remove') { setRemoveTarget(book); return; }
+    if (action === 'editSeries') { setEditTarget([book]); setEditSeries(book.series ?? ''); setEditIndex(book.seriesIndex != null ? String(book.seriesIndex) : ''); return; }
     setActionError('');
     try {
       await runtime.api.setReadingStatus(book.id, action === 'clear' ? null : action);
@@ -112,13 +179,44 @@ export function ShelfPage() {
   const menuOptions = (book: Book) => [
     ...readingStates.filter(state => state !== book.readingState).map(state => ({ value: state, label: '标记为' + readingLabels[state] })),
     ...(book.readingState ? [{ value: 'clear', label: '清除标记' }] : []),
+    { value: 'editSeries', label: '编辑丛书 / 编号' },
     { value: 'remove', label: '从书架拿掉' },
   ];
+  const saveEditSeries = async () => {
+    if (!editTarget) return;
+    setActionError('');
+    try {
+      for (let i = 0; i < editTarget.length; i++) {
+        const book = editTarget[i];
+        const idx = editTarget.length === 1 ? (editIndex === '' ? undefined : Number(editIndex)) : (Number(editIndex) || 1) + i;
+        await runtime.api.patchBookMetadata(book.id, { series: editSeries.trim() || undefined, seriesIndex: idx });
+      }
+      setEditTarget(null);
+      await queryClient.invalidateQueries({ queryKey: ['shelf'] });
+    } catch (error) { setActionError(error instanceof Error ? error.message : '保存失败，请稍后重试。'); }
+  };
   const groupOptions = [
     { value: '', label: '全部书籍' },
     ...(groups.data?.series ?? []).map(value => ({ value: 'series:' + value, label: '系列 · ' + value })),
     ...(groups.data?.tags ?? []).map(value => ({ value: 'tag:' + value, label: '标签 · ' + value })),
   ];
+  // Batch-tag entry: toggle a card's books in/out of the selection, then open the 丛书 editor.
+  const toggleSelect = (entry: Book | { series: Book[] }) => {
+    const ids = 'id' in entry ? [entry.id] : entry.series.map(b => b.id);
+    const next = new Set(selected);
+    const allSelected = ids.every(id => selected.has(id));
+    if (allSelected) ids.forEach(id => next.delete(id));
+    else ids.forEach(id => next.add(id));
+    setSelected(next);
+  };
+  const startBatchEdit = () => {
+    const books = cards.filter(b => 'id' in b && selected.has((b as Book).id)) as Book[];
+    if (books.length === 0) { setActionError('请先选中要标记的书。'); return; }
+    setSelectMode(false);
+    setEditTarget(books);
+    setEditSeries('');
+    setEditIndex('1');
+  };
   const groupLabel = series ? '系列 · ' + series : tag ? '标签 · ' + tag : '';
   const remove = async (book: Book | ContinueReadingItem) => { await runtime.api.browseBatchShelf({ bookIds: [book.id] }, 'remove'); await queryClient.invalidateQueries({ queryKey: ['shelf'] }); };
   const subtitle = queryText ? (query.data?.total ? `「${queryText}」匹配 ${query.data.total} 本` : `没有匹配「${queryText}」的书`) : '收藏好书，随时接着读'; // count and sort live in the sticky toolbar below; saying them twice is noise
@@ -152,12 +250,13 @@ export function ShelfPage() {
           : <button type="button" className="chip shelf-group" aria-haspopup="dialog" onClick={() => setGroupsOpen(true)}>分组</button>}
       </div>
       <FloatingNotice message={actionError} error />
-      {(!query.isPending && (cards.length > 0 || queryText || filtered)) && <div className="shelf-toolbar"><span className="shelf-count muted">{queryText ? `找到 ${query.data?.total ?? 0} 本` : `共 ${query.data?.total ?? 0} 本`}</span><div className="shelf-sort" role="group" aria-label="排序方式">{SHELF_SORTS.map(option => <button key={option.value} type="button" className="chip" aria-pressed={option.value === sort} onClick={() => onSort(option.value)}>{option.label}</button>)}</div></div>}
+      {(!query.isPending && (cards.length > 0 || queryText || filtered)) && <div className="shelf-toolbar"><span className="shelf-count muted">{queryText ? `找到 ${query.data?.total ?? 0} 本` : `共 ${query.data?.total ?? 0} 本`}</span><div className="shelf-sort" role="group" aria-label="排序方式">{SHELF_SORTS.map(option => <button key={option.value} type="button" className="chip" aria-pressed={option.value === sort} onClick={() => onSort(option.value)}>{option.label}</button>)}</div><button type="button" className="chip" aria-pressed={selectMode} onClick={() => { setSelectMode(v => !v); if (selectMode) setSelected(new Set()); }}>{selectMode ? '取消选择' : '批量标记'}</button></div>}
       {query.isPending && <><FloatingNotice message="正在加载书架…" busy /><BookGridSkeleton density={settings.shelfDensity} /></>}
       {query.error && <Callout tone="error" title="书架加载失败">{query.error.message}</Callout>}
       {query.data && cards.length === 0 && filtered && !queryText && <div className="empty-state collection-empty"><BookOpen className="empty-glyph" aria-hidden="true" /><p>{status ? `还没有${readingLabels[status]}的书` : '这个分组里没有书'}</p><p className="muted">{status === 'want' ? '在书籍的“⋯”菜单里可以标记想读。' : '换一个分类，或查看全部书籍。'}</p><div className="empty-actions"><button type="button" className="button" onClick={clearFilters}>查看全部书籍</button></div></div>}
       {query.data && cards.length === 0 && !(filtered && !queryText) && <div className="empty-state collection-empty"><BookOpen className="empty-glyph" aria-hidden="true" /><p>{queryText ? '没有匹配的书' : '书架还没有书'}</p><p className="muted">{queryText ? '换个关键词，或者检查一下作者名的写法' : '从书库挑选喜欢的书，或通过书源搜索，加入书架后就能开始阅读。'}</p><div className="empty-actions">{queryText ? <button type="button" className="button" onClick={clearSearch}>清除搜索</button> : <><Link className="button primary" to="/sources"><Search size={16} />去搜书</Link><Link className="button" to="/library"><LibraryBig size={16} />打开书库</Link></>}</div></div>}
-      {cards.length > 0 && <div className="book-grid" data-density={settings.shelfDensity} data-show-author={String(settings.shelfShowAuthor)} data-show-progress={String(settings.shelfShowProgress)}>{cards.map(book => <BookCard key={book.id} book={book} showAuthor={settings.shelfShowAuthor} showProgress={settings.shelfShowProgress} onRemove={() => setMenuTarget(book)} />)}</div>}
+      {selectMode && <div className="shelf-batch-bar"><button type="button" className="chip" onClick={() => { const all = cards.map(b => (b as Book).id); const allSel = all.length > 0 && all.every(id => selected.has(id)); setSelected(allSel ? new Set() : new Set(all)); }}>{selected.size === cards.length && cards.length > 0 ? '取消全选' : '全选'}</button><span className="muted">已选 {selected.size}</span><button type="button" className="button primary" disabled={selected.size === 0} onClick={startBatchEdit}>标记为丛书</button></div>}
+      {folded.length > 0 && <div className="book-grid" data-density={settings.shelfDensity} data-show-author={String(settings.shelfShowAuthor)} data-show-progress={String(settings.shelfShowProgress)} data-selecting={String(selectMode)}>{selectMode ? cards.map(book => <BookCard key={book.id} book={book as Book} showAuthor={settings.shelfShowAuthor} showProgress={settings.shelfShowProgress} selecting selected={selected.has((book as Book).id)} onToggle={() => toggleSelect(book)} />) : folded.map(entry => 'id' in entry ? <BookCard key={entry.id} book={entry as Book} showAuthor={settings.shelfShowAuthor} showProgress={settings.shelfShowProgress} onRemove={() => setMenuTarget(entry as Book)} /> : <SeriesCard key={'s:' + entry.series[0].series} books={entry.series} showAuthor={settings.shelfShowAuthor} onRemove={book => setMenuTarget(book)} />)}</div>}
       {query.data && pages > 1 && <nav className="shelf-pager" aria-label="翻页"><button type="button" disabled={page <= 1} onClick={() => go({ page: page - 1 })}>上一页</button><span>{page} / {pages}</span><button type="button" disabled={page >= pages} onClick={() => go({ page: page + 1 })}>下一页</button></nav>}
     </section>
     {settingsOpen && <ShelfSettingsSheet settings={settings} onPatch={patch => { void runtime.updateSettings(patch); }} onClose={() => setSettingsOpen(false)} onOpenExternalReader={() => { setSettingsOpen(false); setOpdsOpen(true); }} />}
@@ -171,5 +270,6 @@ export function ShelfPage() {
       else if (answer.startsWith('tag:')) go({ tag: answer.slice(4), series: null });
     }} />}
     {removeTarget && <DialogView dialog={{ kind: 'confirm', title: '移出书架', body: `确定要将《${removeTarget.title}》移出书架吗？`, resolve: (_answer: boolean) => undefined } satisfies Dialog} destructive="移出书架" onClose={answer => { const target = removeTarget; setRemoveTarget(null); if (answer === true) void remove(target); }} />}
+    {editTarget && <Sheet title={editTarget.length === 1 ? `编辑丛书 · 《${editTarget[0].title}》` : `批量标记丛书（${editTarget.length} 本）`} onClose={() => setEditTarget(null)} footer={<><button type="button" className="button" onClick={() => setEditTarget(null)}>取消</button><button type="button" className="button primary" onClick={() => void saveEditSeries()}>保存</button></>}><div className="sheet-form"><div className="sheet-field"><label htmlFor="series-name">丛书名</label><input id="series-name" type="text" value={editSeries} onChange={e => setEditSeries(e.currentTarget.value)} placeholder="例如：三体" /></div><div className="sheet-field"><label htmlFor="series-index">编号</label><input id="series-index" type="number" min="1" step="1" value={editIndex} onChange={e => setEditIndex(e.currentTarget.value)} placeholder={editTarget.length > 1 ? '起始编号（自动递增）' : '例如：1'} /></div>{editTarget.length > 1 && <p className="sheet-text">将从第 {Number(editIndex) || 1} 号开始，按当前顺序递增分配。</p>}</div></Sheet>}
   </div>;
 }
