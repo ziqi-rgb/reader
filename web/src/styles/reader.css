@@ -393,7 +393,9 @@ select {
   background: color-mix(in srgb, var(--reader-ink) 32%, transparent);
   border-radius: var(--radius-pill);
 }
-.reader-screen ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--reader-ink) 48%, transparent); }
+@media (hover: hover) and (pointer: fine) {
+  .reader-screen ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--reader-ink) 48%, transparent); }
+}
 /* No stepper arrows and no corner box: they were the bars that read as chrome. */
 .reader-screen ::-webkit-scrollbar-button { display: none; }
 .reader-screen ::-webkit-scrollbar-corner { background: transparent; }
