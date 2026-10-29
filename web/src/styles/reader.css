@@ -4230,30 +4230,42 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
 }
 .book-card.series-card[data-count] .book-open .cover { position: relative; z-index: 1; }
 
-/* Expanded volume list: an overlay *inside* the card, never a block that grows
-   it. In flow it stretched the whole grid row, so opening one 丛书 shoved every
-   card below it out of place. The size is pinned to the card on both axes: a
-   twenty-volume 丛书 scrolls here rather than spilling over its neighbours. */
+/* Expanded volume list: an overlay on the *cover*, never a block that grows the
+   card. In flow it stretched the whole grid row, so opening one 丛书 shoved every
+   card below it out of place.
+
+   Its box is pinned to the cover's, not the card's: `left`/`right` match the
+   cover's width and `aspect-ratio` matches `.book-card .cover`'s 2/3, so the panel
+   covers the artwork and leaves the title, progress line and author visible
+   underneath. `max-height` keeps it inside even when a card is unusually short. */
 .book-card.series-card .series-list {
   position: absolute;
-  inset: 0;
-  max-width: 100%;
-  max-height: 100%;
+  top: 0.35rem;
+  left: 0.35rem;
+  right: 0.35rem;
+  aspect-ratio: 2 / 3;
+  max-height: calc(100% - 0.7rem);
   z-index: 3;
   display: none;
   flex-direction: column;
-  gap: 0.2rem;
-  padding: 0.4rem;
+  gap: 0.25rem;
+  /* The count badge sits at the panel's top-left corner (z-index 4, so it stays
+     tappable); this keeps the first volume clear of it. */
+  padding: 1.9rem 0.35rem 0.35rem;
   border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--reader-surface) 96%, transparent);
-  box-shadow: 0 2px 12px rgb(0 0 0 / 0.25);
-  backdrop-filter: blur(6px);
+  /* The card surface at 88% alpha with a thin white wash on top: lighter than the
+     cover it sits on, and still translucent. */
+  background:
+    linear-gradient(rgb(255 255 255 / 0.06), rgb(255 255 255 / 0.06)),
+    color-mix(in srgb, var(--reader-surface) 88%, transparent);
+  box-shadow: 0 3px 14px rgb(0 0 0 / 0.28);
+  backdrop-filter: blur(10px);
   overflow: auto;
   overscroll-behavior: contain;
 }
 .book-card.series-card[data-expanded='true'] .series-list { display: flex; }
 .book-card.series-card .series-item {
-  display: flex; align-items: center; gap: 0.4rem;
+  display: flex; align-items: flex-start; gap: 0.4rem;
   min-width: 0;
   flex: none;
   padding: 0.3rem 0.4rem;
@@ -4263,10 +4275,26 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
 }
 .book-card.series-card .series-item-num {
   flex: none; min-width: 1.2rem; text-align: center;
+  line-height: 1.3;
   font-weight: 600; color: var(--reader-accent);
   font-variant-numeric: tabular-nums;
 }
-.book-card.series-card .series-item > a { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--reader-ink); text-decoration: none; }
+.book-card.series-card .series-item > a {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* Two lines, not one: a 丛书 volume title is long enough that a single clamped
+     line showed a couple of characters and nothing identifiable. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  line-clamp: 2;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+  color: var(--reader-ink);
+  text-decoration: none;
+}
 .book-card.series-card .series-item .book-state { position: static; flex: none; }
 /* The volume the reader is in, and the one the collapsed card opens. */
 .book-card.series-card .series-current { font-size: var(--text-meta); color: var(--reader-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
