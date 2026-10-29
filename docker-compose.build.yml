@@ -6,3 +6,6 @@ services:
     build:
       context: .
       dockerfile: server/Dockerfile
+      args:
+        # Base image mirror override (see .env); Docker Hub direct is slow/blocked here.
+        NODE_IMAGE: ${NODE_IMAGE:-node:24-alpine}

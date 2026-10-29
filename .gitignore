@@ -11,6 +11,10 @@ android/.kotlin/
 data/
 server/data/
 
+# local test mounts (not tracked)
+/books/
+/media/
+
 # logs and local env
 *.log
 .env
