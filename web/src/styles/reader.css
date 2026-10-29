@@ -4273,6 +4273,14 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
   background: color-mix(in srgb, var(--reader-line) 30%, transparent);
   font-size: var(--text-label);
 }
+.book-card.series-card .series-item-lead {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  min-width: 1.6rem;
+}
 .book-card.series-card .series-item-num {
   flex: none; min-width: 1.2rem; text-align: center;
   line-height: 1.3;
@@ -4295,7 +4303,7 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
   color: var(--reader-ink);
   text-decoration: none;
 }
-.book-card.series-card .series-item .book-state { position: static; flex: none; }
+.book-card.series-card .series-item .book-state { position: static; flex: none; padding: 0 0.2rem; font-size: var(--text-micro); line-height: 1.5; }
 /* The volume the reader is in, and the one the collapsed card opens. */
 .book-card.series-card .series-current { font-size: var(--text-meta); color: var(--reader-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .book-card.series-card .series-item[data-current='true'] { background: color-mix(in srgb, var(--reader-accent) 14%, transparent); }

@@ -9,6 +9,7 @@ import type { Book, ContinueReadingItem, ReadingState } from '../../../api/types
 import { useRuntime } from '../../../app/providers/runtime-context.tsx';
 import { useSettingsStore } from '../../../shared/stores/settings.store.ts';
 import { useShelf, useShelfGroups, type ShelfFilters } from '../queries/shelf.queries.ts';
+import { foldSeries } from '../series.ts';
 import { SHELF_SORTS, ShelfSettingsSheet } from '../../../ui/shelf-settings.tsx';
 import { IconButton, Callout } from '../../../ui/toolkit.tsx';
 import { OpdsAccess } from '../../../ui/opds-access.tsx';
@@ -130,7 +131,7 @@ export function SeriesCard({ books, showAuthor, onRemove }: { books: Book[]; sho
       <div className="series-current">{progressLabel}</div>
       {showAuthor && <div className="author">{first.author || '未知作者'}</div>}
     </Link>
-    {expanded && <div className="series-list">{books.map(book => <div key={book.id} className="series-item" data-current={book.id === current.id ? 'true' : undefined}><span className="series-item-num">{book.seriesIndex ?? '·'}</span><Link to={`/book/${encodeURIComponent(book.id)}`}>{book.title || '未命名'}</Link>{'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}</div>)}</div>}
+    {expanded && <div className="series-list">{books.map(book => <div key={book.id} className="series-item" data-current={book.id === current.id ? 'true' : undefined}><span className="series-item-lead"><span className="series-item-num">{book.seriesIndex ?? '·'}</span>{'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}</span><Link to={`/book/${encodeURIComponent(book.id)}`}>{book.title || '未命名'}</Link></div>)}</div>}
   </div>;
 }
 
@@ -175,25 +176,8 @@ export function ShelfPage() {
   const query = useShelf(page, sort, queryText, filters);
   const pages = query.data ? Math.max(1, Math.ceil(query.data.total / query.data.pageSize)) : 1;
   const cards = useMemo(() => query.data?.items ?? [], [query.data]);
-  // Fold same-series books (≥2) into a single stacked card, keeping shelf order.
-  const folded = useMemo(() => {
-    const bySeries = new Map<string, Book[]>();
-    for (const item of cards) {
-      if ('series' in item && item.series) {
-        const list = bySeries.get(item.series) ?? [];
-        list.push(item);
-        bySeries.set(item.series, list);
-      }
-    }
-    const out: (Book | ContinueReadingItem | { series: Book[] })[] = [];
-    const emitted = new Set<string>();
-    for (const item of cards) {
-      if ('series' in item && item.series && (bySeries.get(item.series)?.length ?? 0) > 1) {
-        if (!emitted.has(item.series)) { out.push({ series: [...bySeries.get(item.series)!].sort((a, b) => (a.seriesIndex ?? 0) - (b.seriesIndex ?? 0)) }); emitted.add(item.series); }
-      } else out.push(item);
-    }
-    return out;
-  }, [cards]);
+  // Same-series books (≥2) share one slot; `foldSeries` is shared with the home rail.
+  const folded = useMemo(() => foldSeries(cards), [cards]);
   useEffect(() => { void runtime.updateSettings({ shelfSort: sort }); }, [runtime, sort]);
   // Every navigation keeps what it does not change; a new filter or query starts at page 1.
   const go = (next: { q?: string; sort?: typeof sort; page?: number; status?: ReadingState | null; series?: string | null; tag?: string | null }) => {

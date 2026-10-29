@@ -1,9 +1,11 @@
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import { useMemo } from 'react';
 import { ChevronRight, Clapperboard, Headphones, Play, type LucideIcon } from 'lucide-react';
 import { useRuntime } from '../../../app/providers/runtime-context.tsx';
 import { useAuthStore } from '../../../shared/stores/auth.store.ts';
-import { BookCard, useCover } from '../../shelf/pages/ShelfPage.tsx';
+import { BookCard, SeriesCard, useCover } from '../../shelf/pages/ShelfPage.tsx';
+import { foldSeries } from '../../shelf/series.ts';
 import { useShelf } from '../../shelf/queries/shelf.queries.ts';
 import { historyQuery, type Activity } from '../../media/queries/media.queries.ts';
 import type { ContinueReadingItem } from '../../../api/types.ts';
@@ -80,7 +82,7 @@ export function HomePage() {
   const unfinished = (items?: Activity[]) => items?.find(item => !item.completed);
   const book = reading.data?.[0];
   const videoActivity = unfinished(video.data?.items), audioActivity = unfinished(audio.data?.items);
-  const books = (shelf.data?.items ?? []).slice(0, 8);
+  const books = useMemo(() => foldSeries((shelf.data?.items ?? []).slice(0, 8)), [shelf.data]);
   const name = user?.displayName || user?.username || '';
   return <div className="media-screen media-page home-page">
     <header className="home-header"><h1>{greeting(new Date().getHours())}{name ? `，${name}` : ''}</h1><p>从上次停下的地方继续</p></header>
@@ -95,7 +97,9 @@ export function HomePage() {
     </div>
     {books.length > 0 && <section className="home-shelf" aria-label="我的书架">
       <div className="home-section"><h2>我的书架</h2><Link to="/shelf">全部<ChevronRight size={16} aria-hidden="true" /></Link></div>
-      <div className="home-shelf-row">{books.map(item => <BookCard key={item.id} book={item} showAuthor={false} showProgress />)}</div>
+      <div className="home-shelf-row">{books.map(entry => 'id' in entry
+        ? <BookCard key={entry.id} book={entry} showAuthor={false} showProgress />
+        : <SeriesCard key={'s:' + entry.series[0].series} books={entry.series} showAuthor={false} />)}</div>
     </section>}
   </div>;
 }
