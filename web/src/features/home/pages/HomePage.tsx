@@ -36,7 +36,7 @@ function Resume({ book, seriesCount }: { book: ContinueReadingItem; seriesCount:
   const series = book.series || '';
   const title = series || book.title || '未命名';
   const meta = series
-    ? `第 ${book.seriesIndex ?? '?'} 册${seriesCount > 1 ? ` · 共 ${seriesCount} 册` : ''} · ${book.title || '未命名'}`
+    ? `${seriesCount > 1 ? `共 ${seriesCount} 册 · ` : ''}第 ${book.seriesIndex ?? '?'} 册 · ${book.title || '未命名'}`
     : '';
   return <Link className="home-hero" to={`/book/${encodeURIComponent(book.id)}`} aria-label={`继续阅读 ${title}`}>
     <span className="home-hero-cover" aria-hidden="true">{src ? <img src={src} alt="" /> : <b>{book.title}</b>}</span>
