@@ -4202,15 +4202,25 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
   inset-inline-start: 0.35rem;
   /* Above the volume overlay, so tapping it folds the list shut again. */
   z-index: 4;
-  width: 1.75rem; height: 1.75rem;
-  display: grid; place-items: center;
+  /* A pill, not a circle: a fixed square squeezed 📚 and the count onto two lines
+     and read as loud. One small row instead. */
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  padding: 0.1rem 0.4rem;
   border: 0; border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--reader-accent) 90%, transparent);
-  color: #fff; font: inherit; font-size: var(--text-meta); font-weight: 600;
+  background: color-mix(in srgb, var(--reader-accent) 78%, transparent);
+  color: #fff; font: inherit; font-size: var(--text-micro); font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
   cursor: pointer;
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.2);
   opacity: 0.9;
 }
+.book-card.series-card .series-badge { display: inline-flex; align-items: center; gap: 0.15rem; font-size: inherit; line-height: 1.35; }
 .book-card.series-card .series-toggle:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
 @media (hover: hover) and (pointer: fine) {
   .book-card.series-card .series-toggle:hover { opacity: 1; transform: scale(1.06); }
@@ -4251,7 +4261,7 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
   gap: 0.25rem;
   /* The count badge sits at the panel's top-left corner (z-index 4, so it stays
      tappable); this keeps the first volume clear of it. */
-  padding: 1.9rem 0.35rem 0.35rem;
+  padding: 1.6rem 0.35rem 0.35rem;
   border-radius: var(--radius-sm);
   /* The card surface at 88% alpha with a thin white wash on top: lighter than the
      cover it sits on, and still translucent. */
