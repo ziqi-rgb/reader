@@ -11,6 +11,7 @@ import { useRuntime } from '../../../app/providers/runtime-context.tsx';
 import { FloatingNotice } from '../../../ui/floating-notice.tsx';
 import { useAuthStore } from '../../../shared/stores/auth.store.ts';
 import { mergePages } from './SourceCatalogPage.tsx';
+import { newId } from '../../../core/id.ts';
 import { SearchableSelect } from '../../../ui/searchable-select.tsx';
 import { groupSourceResults } from '../../../ui/source-results.ts';
 import { CatalogFeedback } from '../../../ui/catalog-feedback.tsx';
@@ -82,7 +83,7 @@ export function SourcesPage() {
     const run = new AbortController(); searchRun.current = run; ++catalogEpoch.current;
     const current = () => searchRun.current === run;
     setCatalogBusy(true); setCatalogError(''); setSearchState('searching'); setSearchMenu(false);
-    if (!append) { setCatalogPage(undefined); searchSession.current = crypto.randomUUID(); setAcquired(null); setResultGroupKey(null); }
+    if (!append) { setCatalogPage(undefined); searchSession.current = newId(); setAcquired(null); setResultGroupKey(null); }
     searchRequest.current = request;
     try {
       let merged: SourcePage | undefined = append ? catalogPage : undefined;

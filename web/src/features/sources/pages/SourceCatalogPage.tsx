@@ -8,6 +8,7 @@ import type { SourceEntry, SourcePage } from '../../../api/sources.ts';
 import { useRuntime } from '../../../app/providers/runtime-context.tsx';
 import { useSources } from '../hooks/sourceQueries.ts';
 import { FloatingNotice } from '../../../ui/floating-notice.tsx';
+import { newId } from '../../../core/id.ts';
 
 export function mergePages(current: SourcePage | undefined, page: SourcePage): SourcePage {
   const items = new Map((current?.items ?? []).map(item => [item.ref, item]));
@@ -39,10 +40,10 @@ export function SourceCatalogPage() {
 
   const search = async (append = false) => {
     const term = query.trim(); if (!term || !source) return;
-    setBusy(true); setError(''); if (!append) { sessionId.current = crypto.randomUUID(); setPage(undefined); setCursor(undefined); } setParams(previous => { const next = new URLSearchParams(previous); next.set('q', term); if (!append) next.delete('cursor'); return next; });
+    setBusy(true); setError(''); if (!append) { sessionId.current = newId(); setPage(undefined); setCursor(undefined); } setParams(previous => { const next = new URLSearchParams(previous); next.set('q', term); if (!append) next.delete('cursor'); return next; });
     try {
       let merged = append ? page : undefined;
-      for await (const chunk of api.searchSource(source.id, { query: term, sessionId: sessionId.current ?? crypto.randomUUID(), ...(append && cursor ? { cursor } : {}), filters, resultLimit: 10000 })) {
+      for await (const chunk of api.searchSource(source.id, { query: term, sessionId: sessionId.current ?? newId(), ...(append && cursor ? { cursor } : {}), filters, resultLimit: 10000 })) {
         merged = mergePages(merged, chunk); setPage(merged); setCursor(chunk.nextCursor); if (chunk.limitReached) break;
       }
     } catch (reason) { setError(reason instanceof Error ? reason.message : '搜索失败'); }
