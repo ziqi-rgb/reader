@@ -90,6 +90,9 @@ export interface ChromeState {
   /** Which whole-book chapter is open, 1-based, and how many there are. */
   chapterIndex: number;
   chapterCount: number;
+  /** A 丛书 volume exists before/after this one, so the ends of a volume are not the ends of the book. */
+  canPrevVolume?: boolean;
+  canNextVolume?: boolean;
   /** True while a window is being fetched, so the chapter buttons can say so. */
   navigating: boolean;
   canRefresh?: boolean;
@@ -308,7 +311,7 @@ export function ReaderChrome({ state, stage, handlers, tools }: ReaderChromeProp
       </div>
       <div className="footer" hidden={!state.chromeVisible}>
         <div className="progress-row">
-          <button type="button" className="nav-chapter" disabled={state.navigating || state.chapterIndex <= 1}
+          <button type="button" className="nav-chapter" disabled={state.navigating || (state.chapterIndex <= 1 && !state.canPrevVolume)}
             onClick={() => handlers.onChapter(-1)}>{fixed ? '上一页' : '上一章'}</button>
           <div className="reader-scrub">
             <input className="progress-scrubber" type="range" min={1} max={totalPages} step={1}
@@ -317,7 +320,7 @@ export function ReaderChrome({ state, stage, handlers, tools }: ReaderChromeProp
               onInput={(event) => handlers.onScrubPage(Number((event.currentTarget as HTMLInputElement).value))} />
             <span className="progress-page">{pageLabel}</span>
           </div>
-          <button type="button" className="nav-chapter" disabled={state.navigating || state.chapterIndex >= state.chapterCount}
+          <button type="button" className="nav-chapter" disabled={state.navigating || (state.chapterIndex >= state.chapterCount && !state.canNextVolume)}
             onClick={() => handlers.onChapter(1)}>{fixed ? '下一页' : '下一章'}</button>
         </div>
         <div className="reader-actions">

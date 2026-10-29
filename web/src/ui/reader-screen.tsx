@@ -196,6 +196,8 @@ export class ReaderScreen {
    */
   private seriesBooks: Book[] = [];
   private seriesToc = new Map<string, ChromeTocEntry[]>();
+  /** In-flight member-list fetch, so the panel and the hand-off share one request. */
+  private seriesPromise: Promise<Book[]> | null = null;
   private chromeVisible = true;
   /**
    * True while a window is being fetched for a chapter jump.
@@ -371,8 +373,8 @@ export class ReaderScreen {
     const token = ++this.loadingToken;
     this.toolsOpen = false; this.annotation = null; this.toolsReturn = ''; this.toolsSelection = null; this.stopPreview();
     this.content = null; this.book = book;
-    this.seriesBooks = []; this.seriesToc.clear();
-    this.patch({ bookId: book.id, title: book.title, author: book.author, description: book.description, series: book.series, seriesIndex: book.seriesIndex, bookInfoOpen: false, canRefresh: book.format === 'chapters', canSwitch: false, alternatives: null, refreshingChapter: false, sourceName: '', chapterUrl: '', toc: [] });
+    this.seriesBooks = []; this.seriesToc.clear(); this.seriesPromise = null;
+    this.patch({ bookId: book.id, title: book.title, author: book.author, description: book.description, series: book.series, seriesIndex: book.seriesIndex, canPrevVolume: false, canNextVolume: false, bookInfoOpen: false, canRefresh: book.format === 'chapters', canSwitch: false, alternatives: null, refreshingChapter: false, sourceName: '', chapterUrl: '', toc: [] });
     // Fire-and-forget: the volumes are a contents-panel nicety, and blocking the
     // book's own first paint on a shelf query would delay the page the reader asked for.
     if (book.series) void this.loadSeriesBooks(book);
@@ -1454,6 +1456,10 @@ export class ReaderScreen {
     this.closeAlternatives();
     const open = !this.chrome.tocOpen;
     this.patch({ tocOpen: open, settingsOpen: false });
+    // The 丛书 structure is fetched asynchronously, so it can become available
+    // *after* the contents list was first built — `renderToc` notices an
+    // unmerged list and rebuilds it.
+    if (open) void this.renderToc();
   }
 
   private toggleSettings(tab: 'appearance' | 'behavior' | 'speech' = 'behavior'): void {
@@ -1515,15 +1521,17 @@ export class ReaderScreen {
   private async renderToc(force = false): Promise<void> {
     const book = this.book;
     if (!book) return;
+    // Resolve the 丛书 *before* the cache test: the volume list arrives
+    // asynchronously, and a list built while it was still empty has to be
+    // recognisable as "not merged yet" rather than simply "not empty".
+    if (book.series) await this.resolveSeriesBooks();
+    const series = this.seriesBooks.length > 1;
+    const merged = this.chrome.toc.some((entry) => entry.group);
     // Fetched once per book. The panel is opened and closed constantly and the
     // TOC cannot change under a reader, so refetching it is a request per tap on
     // the ☰ button — which, on a NAS over a tunnel, is a visible pause before the
     // panel appears.
-    if (!force && this.chrome.toc.length > 0) return;
-    // Opening the panel is the moment the 丛书 structure matters, so make sure the
-    // volume list is there even if the fire-and-forget fetch from `open()` lost a race.
-    if (book.series) await this.resolveSeriesBooks();
-    const series = this.seriesBooks.length > 1;
+    if (!force && this.chrome.toc.length > 0 && series === merged) return;
     // Inside a 丛书 the panel must list *every* chapter of the open volume, so it
     // asks `/toc` for the whole book instead of reading the loaded window's items
     // (which are one window's worth).
@@ -1827,14 +1835,19 @@ export class ReaderScreen {
     if (this.seriesBooks.length > 0) return this.seriesBooks;
     const book = this.book;
     if (!book?.series) return [];
-    try {
-      const { items } = await this.options.api.listBooks({ series: book.series, pageSize: 200 });
-      if (this.book?.id !== book.id) return [];  // a different book opened meanwhile
-      this.seriesBooks = items
-        .filter((candidate) => candidate.seriesIndex != null)
-        .sort((a, b) => a.seriesIndex! - b.seriesIndex!);
-    } catch { /* the panel simply stays a plain list */ }
-    return this.seriesBooks;
+    this.seriesPromise ??= (async () => {
+      try {
+        const { items } = await this.options.api.listBooks({ series: book.series, pageSize: 200 });
+        if (this.book?.id !== book.id) return [];  // a different book opened meanwhile
+        this.seriesBooks = items
+          .filter((candidate) => candidate.seriesIndex != null)
+          .sort((a, b) => a.seriesIndex! - b.seriesIndex!);
+        // The arrows depend on this list; publish it as soon as it exists.
+        this.patchVolumeCaps();
+      } catch { /* the panel simply stays a plain list */ }
+      return this.seriesBooks;
+    })();
+    return this.seriesPromise;
   }
 
   /**
@@ -1845,7 +1858,25 @@ export class ReaderScreen {
     if (!book.series) { this.seriesBooks = []; return; }
     await this.resolveSeriesBooks();
     if (this.book?.id !== book.id) return;
+    this.patchVolumeCaps();
     if (this.chrome.tocOpen && this.seriesBooks.length > 1) await this.renderToc(true);
+  }
+
+  /**
+   * Whether the chapter arrows should stay live at a volume's edges.
+   *
+   * A 丛书 is one book, so "first chapter" of volume 2 is not the book's first:
+   * the ‹ button has to lead into volume 1 rather than grey out.
+   */
+  private patchVolumeCaps(): void {
+    const index = this.book?.seriesIndex;
+    const indexes = this.seriesBooks
+      .map((candidate) => candidate.seriesIndex)
+      .filter((value): value is number => value != null);
+    this.patch({
+      canPrevVolume: index != null && indexes.some((value) => value < index),
+      canNextVolume: index != null && indexes.some((value) => value > index),
+    });
   }
 
   /**
