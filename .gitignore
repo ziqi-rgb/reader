@@ -32,3 +32,10 @@ web/dist/
 /artifacts/
 /docs/media-*-result.json
 /docs/media-*-benchmark.jsonl
+
+# Reasonix working directory: scratch scripts, pasted attachments, task logs.
+# Nothing in here is source.
+/.reasonix/
+
+# Exported docker images (docker save output, ~1 GB each)
+/*.tar
