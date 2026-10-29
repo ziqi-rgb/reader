@@ -30,7 +30,7 @@
 @media (max-width: 700px) {
   .app-nav { order: 2; display: flex; height: calc(var(--app-nav-bar) + env(safe-area-inset-bottom)); padding: 6px 12px env(safe-area-inset-bottom); border-top: 1px solid var(--nav-line); }
   .app-nav[data-mode='push'] { display: none; }
-  .app-nav-brand, .app-nav-sub, .app-nav-user, .app-nav-search { display: none; }
+  .app-nav-brand, .app-nav-sub, .app-nav-user, .app-nav-search, .app-nav-disclose { display: none; }
   .app-nav-list { display: flex; flex: 1; }
   .app-nav-list > li { flex: 1; min-width: 0; }
   .app-nav-item { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; height: 52px; font-size: var(--text-meta); font-weight: 500; color: var(--nav-muted); }
@@ -53,6 +53,30 @@
   }
   .app-nav-item[aria-current='page'] { background: var(--nav-soft); color: var(--nav-accent); font-weight: 600; }
   .app-nav-sub { margin-top: 2px; }
+  /* The 影音 disclosure: a chevron on the row's trailing edge, so tapping the row
+     still navigates and folding is its own gesture. */
+  .app-nav-group { position: relative; }
+  .app-nav-disclose {
+    position: absolute;
+    inset-block-start: 7px;
+    inset-inline-end: 8px;
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--nav-muted);
+    cursor: pointer;
+  }
+  .app-nav-disclose svg { transition: transform var(--motion-duration) var(--motion-ease); }
+  .app-nav-disclose[aria-expanded='true'] svg { transform: rotate(180deg); }
+  @media (hover: hover) and (pointer: fine) {
+    .app-nav-disclose:hover { background: color-mix(in srgb, var(--color-surface-2) 60%, transparent); }
+  }
+  .app-nav-disclose:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
   .app-nav-subitem { display: flex; align-items: center; gap: 12px; height: 38px; padding: 0 14px 0 46px; border-radius: var(--radius-md); font-size: var(--text-ui); color: var(--nav-muted); }
   .app-nav-subitem i { width: 8px; height: 8px; border-radius: 50%; background: var(--color-ch-video); }
   .app-nav-subitem[data-channel='music'] i { background: var(--color-ch-music); }

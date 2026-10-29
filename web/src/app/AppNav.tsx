@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { BookOpen, Clapperboard, House, Search, UserRound, type LucideIcon } from 'lucide-react';
+import { BookOpen, ChevronDown, Clapperboard, House, Search, UserRound, type LucideIcon } from 'lucide-react';
 import { channelPath, mediaChannels } from '../features/media/components/channel-navigation.tsx';
 import { useAuthStore } from '../shared/stores/auth.store.ts';
 import { useSyncStore } from '../shared/stores/sync.store.ts';
@@ -47,6 +47,10 @@ export function AppNav({ mode }: { mode: Exclude<NavMode, 'hidden'> }) {
   const sync = useSyncStore(state => state.status.state);
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
+  // The media channels are a disclosure, closed by default: three always-open rows
+  // push the sidebar's own destinations down for a reader who is here for books.
+  // Opened on arrival when the page *is* a channel, so the current one marks itself.
+  const [mediaOpen, setMediaOpen] = useState(() => pathname.startsWith('/media'));
   const search = (event: FormEvent) => { event.preventDefault(); const q = query.trim(); if (q) navigate(`/search?q=${encodeURIComponent(q)}`); };
   const connection = connectionLabel(sync);
   return <nav className="app-nav" aria-label="主导航" data-mode={mode}>
@@ -59,18 +63,25 @@ export function AppNav({ mode }: { mode: Exclude<NavMode, 'hidden'> }) {
     <ul className="app-nav-list">
       {destinations.map(({ to, label, icon: Icon, current }) => {
         const active = current(pathname);
-        return <li key={to}>
+        return <li key={to} className={to === '/media/video' ? 'app-nav-group' : undefined}>
           <Link className="app-nav-item" to={to} aria-current={active ? 'page' : undefined}>
             <span className="app-nav-icon" aria-hidden="true"><Icon size={22} strokeWidth={active ? 2.1 : 1.8} /></span>
             <span className="app-nav-label">{label}</span>
           </Link>
-          {to === '/media/video' && <ul className="app-nav-sub" aria-label="影音频道">
-            {mediaChannels.map(item => <li key={item.id}>
-              <Link className="app-nav-subitem" data-channel={item.id} to={channelPath(item.id)} aria-current={channel === item.id ? 'page' : undefined}>
-                <i aria-hidden="true" />{item.label}
-              </Link>
-            </li>)}
-          </ul>}
+          {to === '/media/video' && <>
+            <button type="button" className="app-nav-disclose" aria-expanded={mediaOpen}
+              aria-label={mediaOpen ? '收起影音频道' : '展开影音频道'}
+              onClick={() => setMediaOpen(open => !open)}>
+              <ChevronDown size={16} aria-hidden="true" />
+            </button>
+            {mediaOpen && <ul className="app-nav-sub" aria-label="影音频道">
+              {mediaChannels.map(item => <li key={item.id}>
+                <Link className="app-nav-subitem" data-channel={item.id} to={channelPath(item.id)} aria-current={channel === item.id ? 'page' : undefined}>
+                  <i aria-hidden="true" />{item.label}
+                </Link>
+              </li>)}
+            </ul>}
+          </>}
         </li>;
       })}
     </ul>
