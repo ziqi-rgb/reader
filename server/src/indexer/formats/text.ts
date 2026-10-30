@@ -8,6 +8,7 @@ import {
   type HandlerContext,
   type Manifest,
   type ParsedSource,
+  type ReadingRules,
   type TocEntry,
 } from './registry.ts';
 import { filenameMetadata } from '../metadata.ts';
@@ -73,6 +74,16 @@ const CHAPTER_HTML_REF = 'chapter-html:';
 /** A heading has to be short; a 200-character line is prose, not a title. */
 const MAX_HEADING_LENGTH = 60;
 
+/**
+ * The title of the chapter a file with no headings of its own is read as.
+ *
+ * A single-chapter story is not a broken book, and it is not a book whose text
+ * needs inventing structure either: it has one chapter and it is the whole file.
+ * Calling it 正文 says that; inventing 「第 1 段」-style splits would be the server
+ * deciding where the story breaks, which it cannot know.
+ */
+const WHOLE_BOOK_TITLE = '正文';
+
 export interface DecodedText {
   text: string;
   encoding: 'utf-8' | 'utf-16le' | 'gb18030';
@@ -114,29 +125,149 @@ export interface SplitResult {
   lines: string[];
 }
 
-/** Split decoded text into chapters by scanning headings line by line. */
-export function splitChapters(text: string): SplitResult {
+/**
+ * Split decoded text into chapters.
+ *
+ * Without rules this is the heading scan. With rules it is the reader's own
+ * structure — a literal prefix they typed, or breaks they placed while reading —
+ * and that is the only place their structure can be applied: the chapters have to
+ * be the *server's*, because the client addresses them by reference (`chapter:3`)
+ * and a client-side split would mean every device downloading the whole file to
+ * disagree with the server about what chapter three is.
+ */
+export function splitChapters(text: string, rules: ReadingRules = {}): SplitResult {
   const lines = text.split(/\r\n|\r|\n/);
-  const chapters: Chapter[] = [];
-  let open: { title: string; startLine: number } | null = null;
+  const prefix = rules.headingPrefix?.trim() ?? '';
+  const isHeading = (line: string): boolean => {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.length > MAX_HEADING_LENGTH) return false;
+    // A literal prefix, not a pattern: the reader types text, and text is never
+    // executed as a regular expression.
+    return prefix ? trimmed.startsWith(prefix) : CHAPTER_PATTERNS.some((pattern) => pattern.test(trimmed));
+  };
 
+  // Line index → title. A heading wins over a break on the same line, because a
+  // break placed on a heading line means "this chapter", and the file's own title
+  // is the better name for it.
+  const starts = new Map<number, string>();
   for (let i = 0; i < lines.length; i += 1) {
-    const trimmed = lines[i]!.trim();
-    const isHeading =
-      trimmed.length > 0 &&
-      trimmed.length <= MAX_HEADING_LENGTH &&
-      CHAPTER_PATTERNS.some((pattern) => pattern.test(trimmed));
-
-    if (!isHeading) continue;
-
-    if (open) {
-      chapters.push({ title: open.title, startLine: open.startLine, endLine: i - 1 });
-    }
-    open = { title: trimmed, startLine: i };
+    if (isHeading(lines[i]!)) starts.set(i, lines[i]!.trim());
+  }
+  for (const mark of locateMarks(text, rules.chapterMarks ?? [])) {
+    if (!starts.has(mark.line)) starts.set(mark.line, mark.title);
   }
 
-  if (open) chapters.push({ title: open.title, startLine: open.startLine, endLine: lines.length - 1 });
+  const chapters: Chapter[] = [];
+  const ordered = [...starts.entries()].sort((left, right) => left[0] - right[0]);
+  // Text before the first break is still text: a reader whose first break is
+  // halfway through a chapter must not lose the half that came before it. Blank
+  // leading lines are not text, so they do not become a chapter of their own.
+  if (ordered.length > 0 && ordered[0]![0] > 0 && lines.slice(0, ordered[0]![0]).join('\n').trim()) {
+    chapters.push({ title: '前言', startLine: 0, endLine: ordered[0]![0] - 1 });
+  }
+  for (const [index, [line, title]] of ordered.entries()) {
+    const next = ordered[index + 1];
+    chapters.push({ title, startLine: line, endLine: next ? next[0] - 1 : lines.length - 1 });
+  }
   return { chapters, lines };
+}
+
+/**
+ * Where each of the reader's own breaks begins, as a line index.
+ *
+ * Located by the passage itself rather than by an offset: the selection was made
+ * against a rendered chapter, and every offset in that document changes the
+ * moment a break is added. A passage that is no longer in the file is dropped
+ * rather than approximated — a break at a guessed line cuts the story where the
+ * reader never asked.
+ */
+function locateMarks(
+  text: string,
+  marks: ReadonlyArray<{ title: string; quote: string }>,
+): Array<{ line: number; title: string }> {
+  const found = marks
+    .map((mark) => ({ at: locateQuote(text, mark.quote ?? ''), title: headingFor(mark) }))
+    .filter((hit) => hit.at >= 0)
+    .sort((left, right) => left.at - right.at);
+  // One pass over the file for all of them: a reader can place a hundred breaks,
+  // and re-counting lines from the top for each would make every chapter request
+  // pay for it.
+  let line = 0, scanned = 0;
+  return found.map((hit) => {
+    for (let at = text.indexOf('\n', scanned); at !== -1 && at < hit.at; at = text.indexOf('\n', at + 1)) line += 1;
+    scanned = hit.at;
+    return { line, title: hit.title };
+  });
+}
+
+/**
+ * The offset of `quote` in `text`, tolerating the difference between a rendered
+ * selection and the file.
+ *
+ * The quote comes from the reader's document, where paragraphs are separated by
+ * elements and not by newlines, so a selection spanning two paragraphs does not
+ * occur verbatim in the file. It is matched ignoring whitespace, and the probe is
+ * the quote's first few characters — a candidate is found with `indexOf` and
+ * verified from there, so an ordinary occurrence costs one scan of the file.
+ */
+function locateQuote(text: string, quote: string): number {
+  const needle = quote.replace(/\s+/g, '');
+  if (!needle) return -1;
+  for (let width = Math.min(4, needle.length); width >= 1; width -= 1) {
+    const probe = needle.slice(0, width);
+    let from = text.indexOf(probe);
+    while (from >= 0) {
+      if (matchesIgnoringWhitespace(text, from, needle)) return from;
+      from = text.indexOf(probe, from + 1);
+    }
+  }
+  return -1;
+}
+
+function matchesIgnoringWhitespace(text: string, start: number, needle: string): boolean {
+  let matched = 0;
+  for (let index = start; index < text.length && matched < needle.length; index += 1) {
+    const character = text[index]!;
+    if (/\s/.test(character)) continue;
+    if (character !== needle[matched]) return false;
+    matched += 1;
+  }
+  return matched === needle.length;
+}
+
+function headingFor(mark: { title: string; quote: string }): string {
+  const title = (mark.title ?? '').replace(/\s+/g, ' ').trim();
+  if (title) return title.slice(0, 60);
+  return (mark.quote ?? '').replace(/\s+/g, ' ').trim().slice(0, 30) || '新章节';
+}
+
+/**
+ * The chapters a reader navigates by, which is not the same question as "which
+ * headings does this file contain".
+ *
+ * `splitChapters` answers the second one, and a text with no headings honestly
+ * has none — `parse` below still reports zero for it, because a metadata count
+ * that claimed a chapter the file does not have would be a lie the reader could
+ * check. But the *reader* addresses content by chapter: the windowed contract
+ * publishes items, and an empty item list is not "read the raw stream", it is a
+ * blank page with 0 章 in the table of contents. A single-chapter story used to
+ * open exactly like that.
+ *
+ * So the reading structure of a heading-less text is one chapter covering the
+ * whole file. It is not a split: the server has no evidence for where the story
+ * breaks, and inventing breaks would be worse than having one section. A reader
+ * who wants breaks says so themselves (the client's own chapter marks).
+ *
+ * Whitespace-only text is the one case that keeps zero chapters: there is nothing
+ * to read, and a 「正文」 entry pointing at nothing is not a chapter either.
+ */
+export function readingChapters(text: string, rules: ReadingRules = {}): SplitResult {
+  const { chapters, lines } = splitChapters(text, rules);
+  if (chapters.length > 0 || text.trim() === '') return { chapters, lines };
+  return {
+    chapters: [{ title: WHOLE_BOOK_TITLE, startLine: 0, endLine: Math.max(0, lines.length - 1) }],
+    lines,
+  };
 }
 
 export async function readTextFile(absPath: string): Promise<DecodedText> {
@@ -192,7 +323,8 @@ export const textHandler = registerFileHandler({
       contentHash: createHash('sha256').update(buf).digest('hex'),
       size: buf.byteLength,
       // Only report a count we actually know. Zero chapters means "no headings
-      // found", which the client handles by reading the raw stream.
+      // found" — the file is read as one 正文 chapter (`readingChapters`), but
+      // reporting 1 here would claim a chapter title the text does not contain.
       pageCount: chapters.length > 0 ? chapters.length : null,
       metadata: {
         ...fallback,
@@ -210,7 +342,7 @@ export const textHandler = registerFileHandler({
 
   async manifest(ctx: HandlerContext): Promise<Manifest> {
     const { text } = await readTextFile(ctx.absPath);
-    const { chapters } = splitChapters(text);
+    const { chapters } = readingChapters(text, ctx.overrides ?? {});
 
     return {
       kind: 'text',
@@ -237,10 +369,10 @@ export const textHandler = registerFileHandler({
     };
   },
 
-  /** The chapters the heading scan found, in order. */
+  /** The chapters a reader navigates by, in order (one 正文 chapter when there are no headings). */
   async toc(ctx: HandlerContext): Promise<TocEntry[]> {
     const { text } = await readTextFile(ctx.absPath);
-    return splitChapters(text).chapters.map((chapter, index) => ({
+    return readingChapters(text, ctx.overrides ?? {}).chapters.map((chapter, index) => ({
       href: `chapter:${index}`,
       title: chapter.title,
       level: 0,
@@ -248,11 +380,22 @@ export const textHandler = registerFileHandler({
     }));
   },
 
+  /** What a candidate rule would produce, so a preview costs one request instead of a download. */
+  async tocPreview(ctx: HandlerContext, rules: ReadingRules, limit: number): Promise<string[]> {
+    const { text } = await readTextFile(ctx.absPath);
+    return readingChapters(text, rules).chapters.slice(0, Math.max(1, limit)).map((chapter) => chapter.title);
+  },
+
   /**
    * Body text. Three addressing modes, because clients need all three:
    *   - `chapter-full:<n>` one whole chapter, as the characters it is stored as
    *   - `chapter:<n>` the same chapter, capped at `size` (a streaming window)
-   *   - `chunk:<byteOffset>` for streaming a novel with no headings
+   *   - `chunk:<byteOffset>` the file as characters, unaddressed
+   *
+   * `chapter:` covers a heading-less file too, because the reading structure of
+   * one is a single chapter (`readingChapters`); `chunk:` stays answered for the
+   * clients that were built when it was the only way to read such a file, and
+   * because it is the one reference that needs no chapter structure at all.
    *
    * Not one of them carries the reader's typography, and not one of them carries
    * paragraph boundaries either. `chapter-full:` used to render `<p>` markup on
@@ -297,7 +440,7 @@ export const textHandler = registerFileHandler({
         : '';
     if (wholeChapterRef) {
       const index = Number.parseInt(req.ref.slice(wholeChapterRef.length), 10);
-      const { chapters, lines } = splitChapters(text);
+      const { chapters, lines } = readingChapters(text, ctx.overrides ?? {});
       const chapter = chapters[index];
       if (!chapter) throw new Error(`chapter ${index} is out of range`);
       const body = lines.slice(chapter.startLine, chapter.endLine + 1).join('\n');
@@ -315,7 +458,7 @@ export const textHandler = registerFileHandler({
 
     if (req.ref.startsWith('chapter:')) {
       const index = Number.parseInt(req.ref.slice('chapter:'.length), 10);
-      const { chapters, lines } = splitChapters(text);
+      const { chapters, lines } = readingChapters(text, ctx.overrides ?? {});
       const chapter = chapters[index];
       if (!chapter) throw new Error(`chapter ${index} is out of range`);
       // Sliced *per line* rather than by characters: see the note on the

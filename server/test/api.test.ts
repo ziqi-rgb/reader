@@ -421,6 +421,84 @@ test('a TXT book is indexed without being decoded by the server', async () => {
   assert.equal(body.items[0]!.title, '长篇');
 });
 
+test('a TXT story with no headings opens as one 正文 chapter instead of a blank page', async () => {
+  /*
+   * The shape that used to be unreadable: a single-chapter story whose text has no
+   * 第N章 line anywhere. The manifest published zero items, the windowed reader
+   * built a document with zero sections, and the reader saw an empty page with
+   * 「0 章」 in the contents panel — for a file it could have shown in full.
+   *
+   * One chapter is not a split and not a guess: it is what the file is. The
+   * reader's own way to navigate it is a chapter mark they place while reading,
+   * which the client applies locally.
+   */
+  const session = await createUser('storyuser');
+  const text = '开头的一句。\n中间的一句。\n结尾的一句。';
+  await writeFile(join(booksDir, '单章故事.txt'), text, 'utf8');
+  await ctx.scanner.scan();
+
+  const list = await app.inject({ method: 'GET', url: '/api/v1/books?format=txt&search=单章故事', headers: auth(session.token) });
+  const book = (list.json() as { items: Array<{ id: string }> }).items[0]!;
+  const manifest = await app.inject({ method: 'GET', url: `/api/v1/books/${book.id}/manifest`, headers: auth(session.token) });
+  const content = (manifest.json() as { content: { total: number; items: Array<{ href: string; title: string }> } }).content;
+  assert.equal(content.total, 1);
+  assert.deepEqual(content.items.map((item) => [item.href, item.title]), [['chapter:0', '正文']]);
+
+  const toc = await app.inject({ method: 'GET', url: `/api/v1/books/${book.id}/toc`, headers: auth(session.token) });
+  assert.deepEqual((toc.json() as { toc: Array<{ title: string }> }).toc.map((entry) => entry.title), ['正文']);
+
+  // The chapter is the whole file, line breaks included: the client typesets from
+  // them, so a reply that joined the lines would lose the paragraphs.
+  const body = await app.inject({ method: 'GET', url: `/api/v1/books/${book.id}/assets?ref=chapter-full:0`, headers: auth(session.token) });
+  assert.equal(body.statusCode, 200);
+  assert.equal(body.body, text);
+});
+
+test('a chapter break the reader saved re-splits the server manifest, so no client downloads the book', async () => {
+  /*
+   * Where the reader's structure lives matters: if the client split the book
+   * itself, every customised TXT would have to be downloaded whole and every
+   * device would disagree with the server about what 第三章 is. The rules belong
+   * to the account and are applied where the book is, which is here.
+   */
+  const session = await createUser('breakuser');
+  const text = ['开头一段。', '中间一段。', '新的开始。', '结尾一段。'].join('\n');
+  await writeFile(join(booksDir, '可分章故事.txt'), text, 'utf8');
+  await ctx.scanner.scan();
+
+  const list = await app.inject({ method: 'GET', url: '/api/v1/books?format=txt&search=可分章故事', headers: auth(session.token) });
+  const book = (list.json() as { items: Array<{ id: string }> }).items[0]!;
+  const before = await app.inject({ method: 'GET', url: `/api/v1/books/${book.id}/manifest`, headers: auth(session.token) });
+  assert.equal((before.json() as { content: { total: number } }).content.total, 1);
+
+  // A preview is answered by the server: one request, a few titles, no download.
+  const preview = await app.inject({
+    method: 'GET', url: `/api/v1/books/${book.id}/toc-preview?headingPrefix=${encodeURIComponent('新的')}&limit=10`,
+    headers: auth(session.token),
+  });
+  assert.deepEqual((preview.json() as { titles: string[] }).titles, ['前言', '新的开始。']);
+
+  const saved = await app.inject({
+    method: 'PUT', url: `/api/v1/books/${book.id}/reading-overrides`, headers: auth(session.token),
+    payload: { version: 0, headingPrefix: '', corrections: [], chapterMarks: [
+      { id: 'm', title: '新的开始。', quote: '新的开始。', prefix: '中间一段。\n', suffix: '\n结尾' },
+    ] },
+  });
+  assert.equal(saved.statusCode, 200, saved.body);
+
+  const after = await app.inject({ method: 'GET', url: `/api/v1/books/${book.id}/manifest`, headers: auth(session.token) });
+  const content = (after.json() as { content: { total: number; items: Array<{ title: string }> } }).content;
+  assert.equal(content.total, 2);
+  assert.deepEqual(content.items.map((item) => item.title), ['前言', '新的开始。']);
+  const body = await app.inject({ method: 'GET', url: `/api/v1/books/${book.id}/assets?ref=chapter-full:1`, headers: auth(session.token) });
+  assert.equal(body.body, '新的开始。\n结尾一段。');
+
+  // The rules are the reader's, not the book's: another account still sees one chapter.
+  const other = await createUser('breakuser2');
+  const otherManifest = await app.inject({ method: 'GET', url: `/api/v1/books/${book.id}/manifest`, headers: auth(other.token) });
+  assert.equal((otherManifest.json() as { content: { total: number } }).content.total, 1);
+});
+
 test('a book whose file is gone is not offered as "continue reading"', async () => {
   /*
    * The card and the shelf have to agree about what is visible.

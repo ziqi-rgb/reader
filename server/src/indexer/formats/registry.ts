@@ -184,6 +184,20 @@ export interface AssetPayload {
 
 export type ProgressReporter = (scanned: number) => void;
 
+/**
+ * The reader's own chapter rules for one book.
+ *
+ * These belong to the *account*, not to the file, so a handler can only apply
+ * them when the caller says who is reading — which is why they are handed in
+ * through the context rather than read from the handler's own storage.
+ */
+export interface ReadingRules {
+  /** Lines starting with this literal text begin a chapter. */
+  headingPrefix?: string;
+  /** Chapter breaks the reader placed by hand, located by the passage they chose. */
+  chapterMarks?: ReadonlyArray<{ title: string; quote: string; prefix?: string; suffix?: string }>;
+}
+
 /** Context handed to every handler. Absolute paths are already validated. */
 export interface HandlerContext {
   /** Library-relative path, forward slashes. */
@@ -195,6 +209,8 @@ export interface HandlerContext {
    * the API (the EPUB chapter rewriter) need it to build absolute URLs.
    */
   bookId?: string;
+  /** The current account's chapter rules, when the caller has one for this book. */
+  overrides?: ReadingRules;
 }
 
 export interface FileFormatHandler {
@@ -222,6 +238,15 @@ export interface FileFormatHandler {
    * for anything whose items already are the table of contents.
    */
   toc?(ctx: HandlerContext): Promise<TocEntry[]>;
+  /**
+   * The chapter titles a *candidate* rule would produce, without saving it.
+   *
+   * The client's "preview this heading prefix" button used to answer this by
+   * downloading the whole file and splitting it locally. A preview is a question
+   * about the book, the book is on the server, and answering it here is one
+   * request that transfers a hundred strings instead of a novel.
+   */
+  tocPreview?(ctx: HandlerContext, rules: ReadingRules, limit: number): Promise<string[]>;
   /**
    * Optional cheap check that the file really is this format. Used when the
    * extension is ambiguous (a .zip that may or may not be a comic).

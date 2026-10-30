@@ -12,14 +12,24 @@ test('personal reading overlays persist, reject stale writes and undo without mo
   for (const id of ['one','two']) db.run('INSERT INTO users(id,username,password_hash,role,created_at,updated_at) VALUES(?,?,?,?,?,?)',id,id,'x','member',1,1);
   db.run('INSERT INTO books(id,content_hash,format,created_at,updated_at) VALUES(?,?,?,?,?)','b','hash','txt',1,1);
   const service = new ReadingOverrideService(db);
-  const first = service.save('one','b',{version:0,headingPrefix:'第',corrections:[]});
+  const first = service.save('one','b',{version:0,headingPrefix:'第',corrections:[],chapterMarks:[]});
   const next = service.save('one','b',{...first,headingPrefix:'Chapter '});
   assert.equal(new ReadingOverrideService(db).get('one','b').version,2);
   assert.equal(next.headingPrefix,'Chapter ');
   assert.equal(service.get('two','b').version,0);
   assert.throws(()=>service.save('one','b',first),/另一设备/);
   assert.equal(service.undo('one','b',next.version).headingPrefix,'第');
-  assert.throws(()=>service.save('one','b',{version:3,headingPrefix:'x',corrections:[{} as never]}),/invalid correction/);
+  assert.throws(()=>service.save('one','b',{version:3,headingPrefix:'x',corrections:[{} as never],chapterMarks:[]}),/invalid correction/);
+  // The reader's own chapter breaks: kept whole, and only the fields a break has.
+  const marked = service.save('one','b',{...service.get('one','b'),chapterMarks:[{id:'m',title:'新的开始',quote:'新的开始。',prefix:'前文',suffix:'后文'}]});
+  assert.deepEqual(new ReadingOverrideService(db).get('one','b').chapterMarks,[{id:'m',title:'新的开始',quote:'新的开始。',prefix:'前文',suffix:'后文'}]);
+  assert.throws(()=>service.save('one','b',{...marked,chapterMarks:[{id:'m',title:'',quote:'x',prefix:'',suffix:''}]}),/invalid chapter mark/);
+  assert.throws(()=>service.save('one','b',{...marked,chapterMarks:[{id:'m',title:'t',quote:'',prefix:'',suffix:''}]}),/invalid chapter mark/);
+  // An older client sends back only the fields it understands; that is not an
+  // instruction to delete the breaks the reader placed.
+  const legacy: Record<string, unknown> = { ...marked };
+  delete legacy.chapterMarks;
+  assert.equal(service.save('one','b',legacy as never).chapterMarks.length,1);
   const sync = new SyncService(db,{} as ShelfService);
   const note = {id:'n',bookId:'b',type:'highlight' as const,locator:'rt1:anchor',text:'原文',comment:'',color:'',updatedAt:1,deleted:false};
   sync.push('one',{notes:[note]});

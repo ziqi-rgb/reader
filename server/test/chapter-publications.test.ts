@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Db } from '../src/db/index.ts';
 import { SCHEMA_SQL } from '../src/db/schema.ts';
 import { ChapterPublications, MAX_CHAPTER_BYTES } from '../src/publications/chapters.ts';
+import { UserChapterCache } from '../src/services/user-cache.ts';
 import { ChapterUpdates } from '../src/services/chapter-updates.ts';
 import type { SourceContext, SourceProvider } from '../src/sources/types.ts';
 
@@ -131,6 +132,45 @@ test('switching keeps book identity, old cache and subscriptions; failures never
     await assert.rejects(f.chapters.switchSource(f.provider, f.context, book, 'book', 'book', 'one', switched.content.revision), { code: 'SOURCE_ALREADY_ACQUIRED' });
     assert.equal(f.chapters.binding('u1', book).publication_ref, 'new');
     await updates.stop();
+  } finally { f.db.close(); await rm(f.root, { recursive: true, force: true }); }
+});
+
+test('a prefetch fetches each chapter once and leaves a text file per chapter for the reader', async () => {
+  const f = await fixture();
+  try {
+    f.setItems([
+      { id: 'h1', seq: 0, title: '第一章', kind: 'chapter', mediaType: 'text/html', ref: 'h1' },
+      { id: 'p1', seq: 1, title: '第二章', kind: 'chapter', mediaType: 'text/plain', ref: 'p1' },
+      { id: 'bad', seq: 2, title: '坏章节', kind: 'chapter', mediaType: 'text/plain', ref: 'bad' },
+    ]);
+    f.provider.readResource = async (_ctx, request) => {
+      if (request.ref === 'bad') return { mediaType: 'text/plain; charset=utf-8', text: '   ' };
+      if (request.ref === 'p1') return { mediaType: 'text/plain; charset=utf-8', text: '第二段正文。' };
+      return { mediaType: 'text/html', text: '<p>第一段</p><p>第二段</p><script>evil()</script>' };
+    };
+    const book = await f.chapters.acquire(f.provider, f.context, { entryRef: 'book' }, 'book', { ref: 'book', title: '远程书' });
+    const files = new UserChapterCache(f.dataDir);
+    const result = await f.chapters.prefetch('u1', book, 1, 3, files);
+    assert.equal(result.total, 3); assert.equal(result.cached, 2);
+    // One broken chapter is reported, not fatal: the two good ones stay cached.
+    assert.deepEqual(result.failed.map((entry) => [entry.title, entry.code]), [['坏章节', 'EMPTY_CHAPTER']]);
+    assert.deepEqual((await files.list('u1', book)).map((entry) => entry.name), ['0001 第一章.txt', '0002 第二章.txt']);
+    const exported = await files.files('u1', book);
+    // Markup becomes prose with its paragraphs intact; a script never reaches the file.
+    assert.equal(exported[0]!.data.toString('utf8'), '第一段\n\n第二段\n');
+    assert.equal(exported[1]!.data.toString('utf8'), '第二段正文。\n');
+
+    // Cached bodies are read from the server from now on: the upstream is not asked again.
+    let calls = 0;
+    const before = f.provider.readResource;
+    f.provider.readResource = async (ctx, request) => { calls += 1; return before(ctx, request); };
+    await f.chapters.prefetch('u1', book, 1, 2, files);
+    assert.equal(calls, 0);
+
+    // Accounts are isolated: another reader sees nothing of this cache.
+    assert.deepEqual(await files.list('u2', book), []);
+    assert.equal(await files.clear('u1', book), 2);
+    assert.deepEqual(await files.list('u1', book), []);
   } finally { f.db.close(); await rm(f.root, { recursive: true, force: true }); }
 });
 

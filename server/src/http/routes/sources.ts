@@ -9,6 +9,21 @@ import { searchResponse } from '../search-stream.ts';
 import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { PluginInstaller, PLUGIN_UPLOAD_LIMIT } from '../../sources/plugin-installer.ts';
+import JSZip from 'jszip';
+
+/**
+ * How many chapters one "cache to the server" request may carry.
+ *
+ * A bound rather than the whole book: the client drives the loop in batches, so
+ * it can show progress and stop, and no request has to be long enough that a
+ * proxy or a sleeping laptop can cut it in half.
+ */
+const CHAPTER_CACHE_BATCH = 200;
+
+function chapterNumber(value: unknown, name: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) throw badRequest(`${name} must be a positive integer`);
+  return value;
+}
 
 function textBody(body: unknown, name: string): string {
   const value = (body as Record<string, unknown> | null)?.[name];
@@ -171,6 +186,67 @@ export function registerSourceRoutes(app: FastifyInstance, ctx: AppContext): voi
     reply.header('cache-control', 'no-store').header('x-content-type-options', 'nosniff')
       .header('content-security-policy', "default-src 'none'; img-src data:; sandbox").type(payload.contentType);
     return reply.send(payload.data);
+  });
+
+  /**
+   * Keep a chapter range on this server, in the reader's own directory.
+   *
+   * The client asks for a batch rather than the whole book: it drives the loop,
+   * so it can show progress and stop, and no single request has to outlive a
+   * browser tab. Upstream is asked once per chapter — which is the whole point,
+   * since the alternative is asking again for every device and every cleared
+   * cache.
+   */
+  app.post('/api/v1/books/:id/chapter-cache', { preHandler: auth }, async (request, reply) => {
+    const user = currentUser(request), { id } = request.params as { id: string }; ctx.shelf.get(user.id, id);
+    if (!host.chapters.has(id)) throw badRequest('这本书没有可缓存的章节', 'CACHE_REQUIRES_CHAPTERS');
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const from = chapterNumber(body.from, 'from'), to = chapterNumber(body.to, 'to');
+    if (to < from) throw badRequest('章节范围无效', 'INVALID_RANGE');
+    if (to - from + 1 > CHAPTER_CACHE_BATCH) throw badRequest(`一次最多缓存 ${CHAPTER_CACHE_BATCH} 章`, 'RANGE_TOO_LARGE');
+    return withSignal(request, reply, signal => host.prefetchChapters(user.id, id, from, to, signal));
+  });
+
+  /** What is already on the server for this book, in the reader's own directory. */
+  app.get('/api/v1/books/:id/chapter-cache', { preHandler: auth }, async (request) => {
+    const user = currentUser(request), { id } = request.params as { id: string }; ctx.shelf.get(user.id, id);
+    if (!host.chapters.has(id)) return { chapters: 0, bytes: 0, total: 0, indexes: [] };
+    const files = await host.chapterCache().list(user.id, id);
+    return {
+      chapters: files.length,
+      bytes: files.reduce((sum, file) => sum + file.bytes, 0),
+      total: host.chapters.manifest(user.id, id).total,
+      // Which chapters, not just how many: a client that already has the range it
+      // was about to ask for should not ask at all, and a range with two gaps in
+      // it should cost two requests rather than a re-fetch of the whole thing.
+      indexes: files.map((file) => file.index),
+    };
+  });
+
+  app.delete('/api/v1/books/:id/chapter-cache', { preHandler: auth }, async (request) => {
+    const user = currentUser(request), { id } = request.params as { id: string }; ctx.shelf.get(user.id, id);
+    return { removed: await host.chapterCache().clear(user.id, id) };
+  });
+
+  /**
+   * The cached chapters as one archive, one `txt` per chapter.
+   *
+   * A zip rather than a single file because chapters are the unit the reader
+   * already thinks in, and because a per-chapter file can be dropped into any
+   * reader without being unpacked first.
+   */
+  app.get('/api/v1/books/:id/chapter-cache/zip', { preHandler: auth }, async (request, reply) => {
+    const user = currentUser(request), { id } = request.params as { id: string };
+    const book = ctx.shelf.get(user.id, id);
+    const files = await host.chapterCache().files(user.id, id);
+    if (files.length === 0) throw badRequest('服务器还没有这本书的缓存', 'NO_SERVER_CACHE');
+    const archive = new JSZip();
+    for (const file of files) archive.file(file.name, file.data);
+    const data = await archive.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    const name = `${book.title || 'book'}.zip`;
+    reply.header('content-type', 'application/zip').header('cache-control', 'no-store')
+      .header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+    return reply.send(data);
   });
   app.post('/api/v1/books/:id/switch-preview', { preHandler: auth }, async (request, reply) => {
     const user = currentUser(request), { id } = request.params as { id: string }; ctx.shelf.get(user.id, id);

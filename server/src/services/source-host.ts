@@ -13,6 +13,7 @@ import { FileAcquisitions } from '../sources/acquisitions.ts';
 import { PluginManager } from '../sources/plugin-manager.ts';
 import { ChapterPublications } from '../publications/chapters.ts';
 import { ChapterUpdates } from './chapter-updates.ts';
+import { UserChapterCache } from './user-cache.ts';
 
 function json(value: unknown): string { return JSON.stringify(value ?? {}); }
 function parse(value: string): unknown { try { return JSON.parse(value); } catch { return {}; } }
@@ -239,6 +240,20 @@ export class SourceHost {
 
   refreshPublication(userId: string, bookId: string, signal?: AbortSignal) {
     return this.updates.check(userId, bookId, signal);
+  }
+
+  /** The reader's own chapter files for one book, under `DATA_DIR/user-cache`. */
+  chapterCache(): UserChapterCache { return new UserChapterCache(this.config.dataDir); }
+
+  /**
+   * Keep a chapter range on this server.
+   *
+   * Two caches are written: `chapter_resources`, so reading no longer goes
+   * upstream, and one text file per chapter in the reader's own directory, so
+   * "download" has something to hand over that a person can also open.
+   */
+  prefetchChapters(userId: string, bookId: string, from: number, to: number, signal?: AbortSignal) {
+    return this.chapters.prefetch(userId, bookId, from, to, this.chapterCache(), signal);
   }
 
   async manifest(userId: string, id: string, ref: string, signal?: AbortSignal) {

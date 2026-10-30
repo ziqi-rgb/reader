@@ -1,4 +1,5 @@
 import { requireChapterContent } from './chapter-quality.ts';
+import { chapterText } from './chapter-text.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Db } from '../db/index.ts';
 import type { AssetPayload, Manifest } from '../indexer/formats/registry.ts';
@@ -6,6 +7,7 @@ import { saveCover } from '../indexer/metadata.ts';
 import { AppError, badRequest, conflict, notFound } from '../lib/errors.ts';
 import { decodeManifest } from '../sources/protocol.ts';
 import { chapterMedia, raster, richContent } from './rich-content.ts';
+import type { UserChapterCache } from '../services/user-cache.ts';
 import type {
   AcquireRequest, CatalogEntry, ManifestSnapshot, ResourceResponse, SourceContext, SourceProvider,
 } from '../sources/types.ts';
@@ -186,6 +188,72 @@ export class ChapterPublications {
       );
       return this.payload(body, contentHash, resource.media_type);
     });
+  }
+
+  /**
+   * Fetch a range of chapters into *this server's* storage.
+   *
+   * The alternative — and the behaviour this replaces — is every client fetching
+   * every chapter for itself, which means the upstream site is asked again for
+   * every device and every cleared cache. Here the bytes leave the source once
+   * and are kept twice: in `chapter_resources`, which is what makes later reads
+   * fast on any device, and as one `txt` file per chapter under the reader's own
+   * directory in DATA_DIR, which is what "download" exports.
+   *
+   * Failures are collected rather than thrown: one broken chapter must not undo
+   * the twenty that were fetched before it, and the reader needs to know which
+   * ones to retry.
+   */
+  async prefetch(
+    userId: string, bookId: string, from: number, to: number,
+    files?: UserChapterCache, signal?: AbortSignal,
+  ): Promise<{ total: number; cached: number; failed: Array<{ title: string; code: string }> }> {
+    const items = this.manifest(userId, bookId).items.filter((item) => item.seq >= from - 1 && item.seq < to);
+    const failed: Array<{ title: string; code: string }> = [];
+    let cached = 0;
+    const queue = [...items];
+    // Two at a time: the source host admits at most two concurrent calls per
+    // source instance (see `SourceHost.call`), and a chapter cache is not worth
+    // being the client that gets rate-limited.
+    const workers = Array.from({ length: Math.min(2, queue.length) }, async () => {
+      for (;;) {
+        const item = queue.shift();
+        if (!item) return;
+        signal?.throwIfAborted();
+        try {
+          if (!item.resourceRef) throw badRequest('chapter has no content reference', 'SOURCE_UNSUPPORTED');
+          const payload = await this.fetchChapter(userId, bookId, item.resourceRef, signal);
+          if (files && payload.data) {
+            await files.write(userId, bookId, item.seq + 1, item.title, chapterText(payload.data.toString('utf8'), payload.contentType));
+          }
+          cached += 1;
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          failed.push({ title: item.title, code: error instanceof AppError ? error.code : 'CHAPTER_FAILED' });
+        }
+      }
+    });
+    await Promise.all(workers);
+    return { total: items.length, cached, failed };
+  }
+
+  /**
+   * One chapter's bytes, retried once when the source was merely busy.
+   *
+   * `RATE_LIMITED` means another request held the source's concurrency slot for
+   * a moment — a reader scrolling while this runs — and the whole point of the
+   * batch is to be patient: retrying a second later costs nothing, while giving
+   * up would put a chapter in `failed` that would have succeeded.
+   */
+  private async fetchChapter(userId: string, bookId: string, ref: string, signal?: AbortSignal): Promise<AssetPayload> {
+    try {
+      return await this.asset(userId, bookId, ref, signal);
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'RATE_LIMITED') throw error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      signal?.throwIfAborted();
+      return this.asset(userId, bookId, ref, signal);
+    }
   }
 
   async inspect(provider: SourceProvider, context: SourceContext, publicationRef: string, chapterId: string) {

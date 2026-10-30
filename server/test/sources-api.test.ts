@@ -19,6 +19,7 @@ import { BrowseService } from '../src/services/browse.ts';
 import { UploadService } from '../src/services/uploads.ts';
 import type { CatalogPage, SourceProvider } from '../src/sources/types.ts';
 import { pluginArchive } from './helpers/plugin-package.ts';
+import JSZip from 'jszip';
 
 interface Session { token: string; id: string }
 
@@ -752,4 +753,60 @@ test('default search source is exclusive, persistent, admin-managed and cleared 
   await patch('two', { isDefault: true });
   await h.app.inject({ method: 'DELETE', url: '/api/v1/sources/two', headers: auth(h.admin) });
   assert.deepEqual(await defaults(), []);
+});
+
+test('chapter-cache routes keep chapters on this server and hand them back as a zip', async (t) => {
+  const h = await harness(); t.after(() => h.close());
+  const provider: SourceProvider = {
+    descriptor: {
+      id: 'cache-chapters', label: '缓存源', version: '1',
+      capabilities: ['detail', 'acquire.chapters', 'content.manifest', 'content.resource'],
+    },
+    async detail() { return { ref: 'book', title: '缓存书' }; },
+    async acquire() { return { kind: 'chapters', publicationRef: 'book' }; },
+    async getManifest(_ctx, publicationRef) {
+      return {
+        publicationRef,
+        items: [
+          { id: 'a', seq: 0, title: '第一章', kind: 'chapter', mediaType: 'text/plain', ref: 'a' },
+          { id: 'b', seq: 1, title: '第二章', kind: 'chapter', mediaType: 'text/plain', ref: 'b' },
+        ],
+      };
+    },
+    async readResource(_ctx, request) { return { mediaType: 'text/plain; charset=utf-8', text: request.ref + ' 正文' }; },
+  };
+  h.ctx.sources!.registry.register({ pluginId: 'test.cache', provider });
+  await h.ctx.sources!.create({ id: 'cache-instance', pluginId: 'test.cache', sourceType: 'cache-chapters', name: '缓存源', config: {} });
+  const acquired = await h.app.inject({ method: 'POST', url: '/api/v1/sources/cache-instance/acquire', headers: auth(h.admin), payload: { entryRef: 'book' } });
+  assert.equal(acquired.statusCode, 200, acquired.body);
+  const bookId = acquired.json().publicationId as string;
+
+  const cached = await h.app.inject({ method: 'POST', url: `/api/v1/books/${bookId}/chapter-cache`, headers: auth(h.admin), payload: { from: 1, to: 2 } });
+  assert.equal(cached.statusCode, 200, cached.body);
+  assert.deepEqual(cached.json(), { total: 2, cached: 2, failed: [] });
+
+  const info = await h.app.inject({ method: 'GET', url: `/api/v1/books/${bookId}/chapter-cache`, headers: auth(h.admin) });
+  assert.equal(info.json().chapters, 2); assert.equal(info.json().total, 2); assert.ok(info.json().bytes > 0);
+  // Which chapters, so a client can ask only for what is missing.
+  assert.deepEqual(info.json().indexes, [1, 2]);
+
+  const zip = await h.app.inject({ method: 'GET', url: `/api/v1/books/${bookId}/chapter-cache/zip`, headers: auth(h.admin) });
+  assert.equal(zip.statusCode, 200, zip.body);
+  assert.equal(zip.headers['content-type'], 'application/zip');
+  const names = Object.keys((await new JSZip().loadAsync(zip.rawPayload)).files).sort();
+  assert.deepEqual(names, ['0001 第一章.txt', '0002 第二章.txt']);
+
+  // The range is validated: a bad one is refused instead of fetching whatever the
+  // directory happens to hold.
+  const badRange = await h.app.inject({ method: 'POST', url: `/api/v1/books/${bookId}/chapter-cache`, headers: auth(h.admin), payload: { from: 2, to: 1 } });
+  assert.equal(badRange.statusCode, 400);
+  assert.equal(badRange.json().error.code, 'INVALID_RANGE');
+  const badNumber = await h.app.inject({ method: 'POST', url: `/api/v1/books/${bookId}/chapter-cache`, headers: auth(h.admin), payload: { from: 0, to: 2 } });
+  assert.equal(badNumber.statusCode, 400);
+
+  const cleared = await h.app.inject({ method: 'DELETE', url: `/api/v1/books/${bookId}/chapter-cache`, headers: auth(h.admin) });
+  assert.deepEqual(cleared.json(), { removed: 2 });
+  const empty = await h.app.inject({ method: 'GET', url: `/api/v1/books/${bookId}/chapter-cache/zip`, headers: auth(h.admin) });
+  assert.equal(empty.statusCode, 400);
+  assert.equal(empty.json().error.code, 'NO_SERVER_CACHE');
 });

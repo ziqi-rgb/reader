@@ -32,16 +32,33 @@ function resolveHandler(ctx: AppContext, bookId: string, format: string) {
   return new FilePublications(ctx.db, ctx.config).handler(format);
 }
 
-/** Validated storage context, independent of a book's discovery source. */
-function sourceContext(ctx: AppContext, bookId: string) {
-  return new FilePublications(ctx.db, ctx.config).context(bookId);
+/**
+ * Validated storage context, independent of a book's discovery source.
+ *
+ * `userId` is what makes the reader's own chapter rules available to a format
+ * handler: a heading prefix and the breaks a reader placed belong to the account,
+ * not to the file, and a handler that split the book without them would publish a
+ * table of contents the reader never sees.
+ */
+function sourceContext(ctx: AppContext, bookId: string, userId?: string) {
+  const context = new FilePublications(ctx.db, ctx.config).context(bookId);
+  if (!userId) return context;
+  const overrides = new ReadingOverrideService(ctx.db).get(userId, bookId);
+  if (!overrides.headingPrefix && overrides.chapterMarks.length === 0) return context;
+  return {
+    ...context,
+    overrides: {
+      ...(overrides.headingPrefix ? { headingPrefix: overrides.headingPrefix } : {}),
+      ...(overrides.chapterMarks.length > 0 ? { chapterMarks: overrides.chapterMarks } : {}),
+    },
+  };
 }
 
 /** Stored chapter snapshots and local files share the reader's content contract. */
 async function contentManifest(ctx: AppContext, userId: string, bookId: string, format: string) {
   if (ctx.sources?.chapters.has(bookId)) return ctx.sources.chapters.manifest(userId, bookId);
   const handler = resolveHandler(ctx, bookId, format);
-  return handler ? handler.manifest({ ...sourceContext(ctx, bookId), bookId }) : null;
+  return handler ? handler.manifest({ ...sourceContext(ctx, bookId, userId), bookId }) : null;
 }
 
 /**
@@ -319,7 +336,7 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
     const handler = resolveHandler(ctx, id, book.format);
     if (!handler) return { toc: [] };
 
-    const context = { ...sourceContext(ctx, id), bookId: id };
+    const context = { ...sourceContext(ctx, id, user.id), bookId: id };
     if (handler.toc) return { toc: await handler.toc(context) };
 
     // Default: the format has no navigation of its own, so its items are its
@@ -328,6 +345,35 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
     return {
       toc: manifest.items.map((item: ContentItem) => ({ href: item.href, title: item.title, level: 0, spine: item.seq })),
     };
+  });
+
+  /**
+   * What a candidate chapter rule would produce, without saving it.
+   *
+   * The reader's "preview this heading prefix" button used to download the whole
+   * file and split it in the browser. A preview is a question about a book that
+   * lives on the server, so it is answered here: one request, a hundred titles,
+   * and the book's bytes never leave this machine.
+   */
+  app.get('/api/v1/books/:id/toc-preview', { preHandler: auth }, async (request) => {
+    const user = currentUser(request), { id } = request.params as { id: string };
+    const book = ctx.shelf.get(user.id, id);
+    if (ctx.sources?.chapters.has(id)) throw badRequest('书源目录由书源提供', 'CUSTOM_TOC_UNSUPPORTED');
+    const handler = resolveHandler(ctx, id, book.format);
+    if (!handler || !('tocPreview' in handler) || typeof handler.tocPreview !== 'function') {
+      throw badRequest('此格式不支持自定义目录规则', 'CUSTOM_TOC_UNSUPPORTED');
+    }
+    const query = request.query as Record<string, string | undefined>;
+    const prefix = (query.headingPrefix ?? '').trim();
+    if (prefix.length > 60 || /[\r\n]/.test(prefix)) throw badRequest('标题前缀最多 60 个字符', 'INVALID_PREFIX');
+    const limit = Math.min(200, Math.max(1, Number.parseInt(query.limit ?? '100', 10) || 100));
+    const overrides = new ReadingOverrideService(ctx.db).get(user.id, id);
+    const titles = await handler.tocPreview(
+      { ...sourceContext(ctx, id, user.id), bookId: id },
+      { ...(prefix ? { headingPrefix: prefix } : {}), ...(overrides.chapterMarks.length ? { chapterMarks: overrides.chapterMarks } : {}) },
+      limit,
+    );
+    return { titles, total: titles.length };
   });
 
   /**
@@ -345,7 +391,6 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
     const manifest = await contentManifest(ctx, user.id, id, book.format);
     if (!manifest) throw badRequest('此格式暂不支持正文搜索', 'UNSUPPORTED_FORMAT');
     const overrides = new ReadingOverrideService(ctx.db).get(user.id,id);
-    if (overrides.headingPrefix) throw badRequest('自定义 TXT 目录使用本地搜索','SEARCH_LOCAL_LAYOUT');
     const chapters = ctx.sources?.chapters.has(id) ? ctx.sources.chapters : undefined;
     const handler = chapters ? null : resolveHandler(ctx,id,book.format);
     reply.header('cache-control','no-store');
@@ -353,7 +398,7 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
       const ref = item.resourceRef ?? (item.format === 'html' && item.href.startsWith('chapter:') ? item.href.replace('chapter:','chapter-full:') : item.href);
       if (chapters) return chapters.asset(user.id,id,ref,chapterSignal);
       if (!handler) throw badRequest('此格式暂不支持正文搜索','UNSUPPORTED_FORMAT');
-      return handler.asset({...sourceContext(ctx,id),bookId:id},{ref});
+      return handler.asset({...sourceContext(ctx,id,user.id),bookId:id},{ref});
     },signal,chapters ? 1 : 8));
   });
 
@@ -375,7 +420,7 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
     const handler = resolveHandler(ctx, id, book.format);
     if (!handler) throw badRequest(`format ${book.format} has no assets`, 'UNSUPPORTED_FORMAT');
 
-    const payload = await handler.asset({ ...sourceContext(ctx, id), bookId: id }, { ref });
+    const payload = await handler.asset({ ...sourceContext(ctx, id, user.id), bookId: id }, { ref });
     return sendAssetPayload(request, reply, payload);
   });
 
@@ -425,7 +470,7 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
     // serving that *path* is how a client fetches the volume's pages out of it.
     const dirHandler = directoryHandlerForFormat(book.format);
     const owned = dirHandler?.files
-      ? await dirHandler.files({ ...sourceContext(ctx, id), bookId: id })
+      ? await dirHandler.files({ ...sourceContext(ctx, id, user.id), bookId: id })
       : null;
     const rows = ctx.db.all<{ rel_path: string; size: number }>(
       'SELECT rel_path, size FROM book_files WHERE book_id = ? AND missing = 0',
@@ -464,7 +509,7 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
       const absOwner = resolveInside(ctx.config.booksDir, assertSafeRel(wanted));
       if (!existsSync(absOwner)) throw notFound('file is no longer on disk', 'FILE_MISSING');
       const payload = await dirHandler?.asset(
-        { ...sourceContext(ctx, id), bookId: id },
+        { ...sourceContext(ctx, id, user.id), bookId: id },
         { ref: entry.ref },
       );
       if (!payload) throw notFound('no such file for this book', 'FILE_MISSING');
