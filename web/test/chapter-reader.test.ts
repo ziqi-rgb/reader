@@ -8,6 +8,7 @@ import { ApiError } from '../src/api/errors.ts';
 import type { Book, BookContent, Manifest, Session } from '../src/api/types.ts';
 import { OfflineStore } from '../src/store/offline.ts';
 import { PublicationCache, publicationScope } from '../src/store/publications.ts';
+import { SessionCache } from '../src/store/session-cache.ts';
 import { DEFAULT_APP_SETTINGS } from '../src/store/settings.ts';
 import { ReaderScreen } from '../src/ui/reader-screen.tsx';
 import { App } from '../src/app.ts';
@@ -58,6 +59,9 @@ const screens: ReaderScreen[] = [];
 afterEach(() => {
   for (const screen of screens.splice(0)) screen.dispose();
   document.body.replaceChildren();
+  // The session cache is `sessionStorage`, which this environment keeps between
+  // cases: a chapter one test injected must not be readable by the next.
+  sessionStorage.clear();
 });
 
 async function setup(kv = new MemoryKv(), blobs = new MemoryBlobs(), userId = 'u1', server = 'http://one.test') {
@@ -307,9 +311,10 @@ describe('chapter publication reading', () => {
 
   it.each([400, 401, 403, 404])('does not fall back to cached content after an HTTP %i response', async (status) => {
     const env = await setup();
-    const cache = new PublicationCache(env.platform.kv, env.platform.blobs, publicationScope(env.api.baseUrl, 'u1'));
+    const scope = publicationScope(env.api.baseUrl, 'u1');
+    const cache = new PublicationCache(env.platform.kv, env.platform.blobs, scope, new SessionCache(scope));
     await cache.putManifest(book.id, manifest(content(['a'])));
-    await cache.putResource(book.id, 'resource:r1:a', new TextEncoder().encode('private chapter'));
+    cache.putSessionResource(book.id, 'resource:r1:a', new TextEncoder().encode('private chapter'));
     env.transport.json({ error: { code: 'DENIED', message: 'Denied' } }, status);
     await env.screen.open(book);
     expect(body(env.screen)?.textContent ?? '').not.toContain('private chapter');
@@ -320,11 +325,15 @@ describe('chapter publication reading', () => {
   it('separates cached manifests, chapter bytes and progress between accounts and servers', async () => {
     const kv = new MemoryKv();
     const blobs = new MemoryBlobs();
-    const one = new PublicationCache(kv, blobs, publicationScope('http://one.test/', 'u1'));
+    const scopeOne = publicationScope('http://one.test/', 'u1');
+    const one = new PublicationCache(kv, blobs, scopeOne, new SessionCache(scopeOne));
     await one.putManifest(book.id, manifest(content(['a'])));
-    await one.putResource(book.id, 'ref', new TextEncoder().encode('private'));
+    one.putSessionResource(book.id, 'ref', new TextEncoder().encode('private'));
+    // The session copy itself is isolated by scope, not only the persisted part.
+    expect(await one.resource(book.id, 'ref')).not.toBeNull();
     for (const [server, user] of [['http://one.test', 'u2'], ['http://two.test', 'u1']]) {
-      const other = new PublicationCache(kv, blobs, publicationScope(server!, user!));
+      const otherScope = publicationScope(server!, user!);
+      const other = new PublicationCache(kv, blobs, otherScope, new SessionCache(otherScope));
       expect(await other.manifest(book.id)).toBeNull();
       expect(await other.resource(book.id, 'ref')).toBeNull();
     }
@@ -360,7 +369,10 @@ it('refreshes only the current chapter, updates offline cache and preserves text
   fail = true; await click(env.screen, '刷新当前章节');
   await vi.waitFor(() => expect(noticeText()).toContain('刷新正文失败'));
   expect(body(env.screen)?.textContent).toContain('已更新的章节正文'); expect(refreshes).toBe(2);
-  const cache = new PublicationCache(env.platform.kv, env.platform.blobs, publicationScope(env.api.baseUrl, 'u1'));
+  const scope = publicationScope(env.api.baseUrl, 'u1');
+  const cache = new PublicationCache(env.platform.kv, env.platform.blobs, scope, new SessionCache(scope));
+  // The refreshed chapter is kept for this session (never on disk), so flipping back
+  // to it in the same sitting costs no request.
   expect(new TextDecoder().decode((await cache.resource(book.id, 'resource:r1:a'))!)).toContain('已更新的章节正文');
 });
 

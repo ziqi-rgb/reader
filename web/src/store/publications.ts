@@ -1,17 +1,30 @@
 import type { ReadingOverrides } from '../api/types.ts';
 import type { BlobStore, KeyValueStore } from '../core/platform.ts';
+import type { SessionCache } from './session-cache.ts';
 import type { BookContent, Manifest, TocEntry } from '../api/types.ts';
 
+/** One chapter a previous version of this client left on disk. */
 export interface CachedResource { bookId: string; ref: string; bytes: number }
 const writes = new Map<string, Promise<unknown>>();
 export const OFFLINE_FILE = '__complete_file__';
 
 /**
- * Device cache for staged publications.
+ * Device storage for a publication: its *metadata* on disk, its *text* in memory.
  *
- * The cache namespace includes both the server and account.  A book id is only
+ * The split is the point. Chapter text is not kept here at all — it lives in
+ * `SessionCache`, which the browser drops when it closes. A reader who wants a
+ * copy keeps it on the server (all their devices share it) or downloads a file;
+ * a browser that quietly retained every chapter it had ever displayed was the
+ * behaviour that made "只保存到正在访问的客机" true, and it was a bad trade: the
+ * copy nobody asked for was the one nobody could find.
+ *
+ * What *is* persistent is small and derived: the manifest, the window list, the
+ * table of contents, and the reader's own overlays. Those are what let a book
+ * open instantly and remember how it was configured, and none of them is the book.
+ *
+ * The namespace includes both the server and the account: a book id is only
  * unique inside one account, and using it on its own would let signing out and
- * into another server expose the previous account's chapter text.
+ * into another server expose the previous account's data.
  */
 export class PublicationCache {
   private readonly scopeKey: string;
@@ -20,6 +33,8 @@ export class PublicationCache {
     private readonly kv: KeyValueStore,
     private readonly blobs: BlobStore,
     scope: string,
+    /** The book's text as cached for this browser session only; see `SessionCache`. */
+    private readonly session?: SessionCache,
   ) {
     this.scopeKey = encodeURIComponent(scope);
   }
@@ -39,22 +54,33 @@ export class PublicationCache {
     await this.kv.set(this.metaKey(bookId), JSON.stringify(manifest));
   }
 
+  /**
+   * A chapter's bytes, from this browser session only.
+   *
+   * The persistent store is deliberately not consulted: text left on disk by an
+   * older build is not something this client reads any more, so a reader is never
+   * shown a chapter from a copy the panel says it does not keep.
+   */
   async resource(bookId: string, ref: string): Promise<Uint8Array | null> {
-    return this.blobs.get(this.resourceKey(bookId, ref));
+    return this.session?.get(bookId, ref) ?? null;
   }
 
-  async putResource(bookId: string, ref: string, bytes: Uint8Array): Promise<void> {
-    await this.exclusive(async () => {
-      const entries = await this.entries();
-      const retained = entries.filter(e => e.bookId !== bookId || e.ref !== ref);
-      const used = retained.reduce((sum, entry) => sum + entry.bytes, 0);
-      if (used + bytes.byteLength > await this.quota()) throw new Error('离线缓存配额不足，请清理缓存或提高配额');
-      const key = this.resourceKey(bookId, ref);
-      const previous = await this.blobs.get(key);
-      await this.blobs.put(key, bytes);
-      try { await this.kv.set(this.indexKey(), JSON.stringify([...retained, { bookId, ref, bytes: bytes.byteLength }])); }
-      catch (error) { if (previous) await this.blobs.put(key, previous); else await this.blobs.remove(key); throw error; }
-    });
+  /**
+   * Keep a chapter for this browser session only.
+   *
+   * Returns whether the copy survived into `sessionStorage`; it lives in memory
+   * either way. A single chapter fits comfortably — that is all this cache is for.
+   */
+  putSessionResource(bookId: string, ref: string, bytes: Uint8Array): boolean {
+    return this.session?.put(bookId, ref, bytes) ?? false;
+  }
+
+  sessionBytes(bookId?: string): number {
+    return this.session?.bytes(bookId) ?? 0;
+  }
+
+  clearSession(bookId?: string): void {
+    this.session?.clear(bookId);
   }
 
   async overrides(bookId: string): Promise<ReadingOverrides | null> { const raw = await this.kv.get(this.metaKey(bookId) + ':overrides'); try { return raw ? JSON.parse(raw) as ReadingOverrides : null; } catch { return null; } }
@@ -71,20 +97,19 @@ export class PublicationCache {
     try { return value ? JSON.parse(value) as TocEntry[] : null; } catch { return null; }
   }
   async putToc(bookId: string, toc: TocEntry[]): Promise<void> { await this.kv.set(this.metaKey(bookId) + ':toc', JSON.stringify(toc)); }
-  async task(bookId: string): Promise<string | null> { return this.kv.get(this.metaKey(bookId) + ':task'); }
-  async putTask(bookId: string, value: string): Promise<void> { await this.kv.set(this.metaKey(bookId) + ':task', value); }
-  async quota(): Promise<number> { return Number(await this.kv.get(this.indexKey() + ':quota')) || 256 * 1024 * 1024; }
-  async setQuota(bytes: number): Promise<void> {
-    if (!Number.isSafeInteger(bytes) || bytes < 1024 * 1024 || bytes > 10 * 1024 * 1024 * 1024) throw new Error('缓存配额应为 1–10240 MiB');
-    await this.exclusive(async () => {
-      if ((await this.entries()).reduce((n, e) => n + e.bytes, 0) > bytes) throw new Error('新配额低于当前占用，请先清理缓存');
-      await this.kv.set(this.indexKey() + ':quota', String(bytes));
-    });
-  }
+
+  /**
+   * Chapter text an earlier build left on this device.
+   *
+   * Read-only and kept only so it can be reported and deleted: nothing writes
+   * here any more. A reader upgrading should be able to see what is still taking
+   * space and clear it in one tap.
+   */
   async entries(): Promise<CachedResource[]> {
     const raw = await this.kv.get(this.indexKey());
     if (raw) return JSON.parse(raw) as CachedResource[];
-    // Adopt previously read chapters into the quota without exposing another account.
+    // Older builds predate the index: adopt their blobs by key so the cleanup UI
+    // is complete rather than showing an empty list over real files.
     const prefix = `reader.publication.resource.v1:${this.scopeKey}:`;
     const entries: CachedResource[] = [];
     for (const key of await this.blobs.list()) {
@@ -95,6 +120,7 @@ export class PublicationCache {
     }
     return entries;
   }
+
   async removeBook(bookId: string): Promise<void> {
     await this.exclusive(async () => {
       const entries = await this.entries();

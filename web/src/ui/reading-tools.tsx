@@ -2,19 +2,28 @@ import type { ReadingOverrides } from './reading-overrides.ts';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ConfirmSheet, Sheet } from './sheet.tsx';
 import type { ReaderApi } from '../api/client.ts';
-import type { Manifest, Note } from '../api/types.ts';
+import type { ChapterCacheInfo, Manifest, Note } from '../api/types.ts';
 import type { OfflineStore } from '../store/offline.ts';
+import type { SessionCache } from '../store/session-cache.ts';
 import type { SyncEngine } from '../core/sync.ts';
 import { PublicationCache } from '../store/publications.ts';
-import { OfflineDownload, type DownloadState } from '../core/offline-download.ts';
+import { BookTransfer, type TransferMode, type TransferState } from '../core/book-transfer.ts';
 import { decodeAnchor, encodeAnchor, findText, type SearchHit, type TextAnchor } from './text-anchor.ts';
 import { ApiError } from '../api/errors.ts';
 import { newId } from '../core/id.ts';
 import { FloatingNotice } from './floating-notice.tsx';
 
 export interface SearchSection { id: string; title: string; text: string }
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KiB`;
+  return `${bytes} B`;
+}
 export interface ReadingToolsProps {
   api: ReaderApi; cache: PublicationCache; offline: OfflineStore; sync: SyncEngine; manifest: Manifest;
+  /** Chapter text cached for this browser session only (dropped when it closes). */
+  session: SessionCache;
   selection: TextAnchor | null; locator: string; returnLocator: string;
   sections(signal: AbortSignal): AsyncGenerator<SearchSection>;
   navigate(target: TextAnchor | string): Promise<void>;
@@ -44,16 +53,28 @@ export function ReadingTools(props: ReadingToolsProps) {
   const [noteFilter, setNoteFilter] = useState<'all' | 'bookmark' | 'annotation'>('all');
   const [deleteId, setDeleteId] = useState('');
   const editorRef = useRef<HTMLDivElement>(null);
-  const [from, setFrom] = useState(1), [to, setTo] = useState(['chapters', 'txt'].includes(props.manifest.book.format) ? props.manifest.content?.total ?? 1 : 1);
-  const [downloadReady, setDownloadReady] = useState(false);
-  const [download, setDownload] = useState<DownloadState | null>(null);
-  const [usage, setUsage] = useState(0), [books, setBooks] = useState<Array<{ id: string; bytes: number }>>([]), [quota, setQuota] = useState(256);
+  const bookId = props.manifest.book.id;
+  const book = props.manifest.book;
+  const totalChapters = props.manifest.content?.total ?? 1;
+  /**
+   * Whether the content is addressed chapter by chapter. The server splits a TXT
+   * by the reader's own rules too (a heading prefix, their chapter marks), so its
+   * chapter references stay valid even then — which is what keeps a customised
+   * book from having to be downloaded whole.
+   */
+  const ranged = (book.format === 'chapters' || book.format === 'txt') && !!props.manifest.content;
+  const [from, setFrom] = useState(1), [to, setTo] = useState(totalChapters);
+  const [transfer, setTransfer] = useState<TransferState | null>(null);
+  const [server, setServer] = useState<ChapterCacheInfo | null>(null);
+  const [clearServer, setClearServer] = useState(false);
+  const [usage, setUsage] = useState(0), [books, setBooks] = useState<Array<{ id: string; bytes: number }>>([]);
   const [removeId, setRemoveId] = useState('');
   const [returnTo] = useState(props.returnLocator);
   const searchRun = useRef<AbortController | null>(null), alive = useRef(true);
-  const task = useMemo(() => new OfflineDownload(props.api, props.cache, props.manifest, state => { if (alive.current) setDownload(state); }), []);
-  const bookId = props.manifest.book.id;
-  const rangedDownload = ['chapters', 'txt'].includes(props.manifest.book.format) && !props.overrides.headingPrefix;
+  const task = useMemo(
+    () => new BookTransfer(props.api, props.cache, props.session, props.manifest, state => { if (alive.current) setTransfer(state); }, { perChapter: ranged }),
+    [props.manifest, ranged],
+  );
   const visibleNotes = notes.filter(note => noteFilter === 'all' || (noteFilter === 'bookmark' ? note.type === 'bookmark' : note.type !== 'bookmark'));
   const bookmarked = notes.some(note => note.type === 'bookmark' && note.locator === props.locator);
   useEffect(() => { if (editing || composing) editorRef.current?.querySelector('textarea')?.focus(); }, [editing, composing]);
@@ -62,16 +83,28 @@ export function ReadingTools(props: ReadingToolsProps) {
     for (const entry of entries) grouped.set(entry.bookId, (grouped.get(entry.bookId) ?? 0) + entry.bytes);
     if (!alive.current) return;
     setUsage(entries.reduce((sum, e) => sum + e.bytes, 0)); setBooks([...grouped].map(([id, bytes]) => ({ id, bytes })));
-    setQuota((await props.cache.quota()) / 1024 / 1024);
   }
   async function action(work: () => Promise<unknown>) {
     setMessage('');setMessageError(false);
     try { await work(); } catch (error) { if (alive.current) {setMessageError(true);setMessage(error instanceof Error ? error.message : '操作失败');} }
   }
   useEffect(() => {
-    void action(async () => { await task.load(); if (!alive.current) return; setDownloadReady(true); if (task.state.status !== 'idle') { setFrom(task.state.from); setTo(task.state.to); } await storage(); });
+    void action(async () => {
+      const info = await task.serverInfo();
+      if (alive.current) setServer(info);
+      await storage();
+    });
     return () => { alive.current = false; searchRun.current?.abort(); if (task.state.status === 'running') void task.pause().catch(() => undefined); props.stopPreview(); };
   }, []);
+
+  /** Run one destination to completion, then refresh what the panel reports. */
+  async function startTransfer(mode: TransferMode) {
+    await action(async () => {
+      await task.start(mode, ranged ? from : undefined, ranged ? to : undefined);
+      if (alive.current) setServer(await task.serverInfo());
+      await storage();
+    });
+  }
   async function search() {
     searchRun.current?.abort(); const run = searchRun.current = new AbortController();
     setHits([]); setScanned(0); setSearching(true); setMessage('');setMessageError(false);
@@ -126,7 +159,7 @@ export function ReadingTools(props: ReadingToolsProps) {
       <div className="reading-tool-panel" id="reading-tool-panel">
       <FloatingNotice message={message} error={messageError} />
       {deleteId && <ConfirmSheet danger title="删除笔记" text="确定删除这条笔记或书签？" confirmText="确认删除" onCancel={()=>setDeleteId('')} onConfirm={()=>{const id=deleteId;setDeleteId('');void edit(async()=>{await props.offline.deleteNote(id);props.sync.schedule();setNotes(props.offline.notesFor(bookId));props.onNotes();});}} />}
-      {removeId && <ConfirmSheet danger title="清理缓存" text="只删除此设备的书籍缓存，保留原书、进度和笔记。" confirmText="确认清理" cancelText="保留缓存" onCancel={()=>setRemoveId('')} onConfirm={()=>{const id=removeId;setRemoveId('');void action(async()=>{await props.cache.removeBook(id);setDownload(null);await storage();});}} />}
+      {removeId && <ConfirmSheet danger title="清理缓存" text="只删除此设备的书籍缓存，保留原书、进度和笔记。" confirmText="确认清理" cancelText="保留缓存" onCancel={()=>setRemoveId('')} onConfirm={()=>{const id=removeId;setRemoveId('');void action(async()=>{await props.cache.removeBook(id);await storage();});}} />}
       {tab === 'search' && <section aria-label="书内搜索">
         <h3>书内搜索</h3>
         <form className="reading-tool-search" onSubmit={event => { event.preventDefault(); if (query.trim()) void search(); }}><label>关键词<input placeholder="输入要查找的文字" value={query} maxLength={200} onInput={event => setQuery(event.currentTarget.value)} /></label><button className="button primary" disabled={searching || !query.trim()}>搜索全文</button></form>
@@ -153,16 +186,28 @@ export function ReadingTools(props: ReadingToolsProps) {
         </li>)}</ul>
         {!visibleNotes.length && <div className="reading-tool-empty"><strong>{noteFilter === 'bookmark' ? '还没有书签' : noteFilter === 'annotation' ? '还没有高亮或批注' : '还没有阅读记录'}</strong><p>加书签，记住当前读到的位置。<br />在正文选中文字后，可添加高亮或批注。</p>{!props.selection && <button className="button" onClick={props.onClose}>返回正文</button>}</div>}</>}
       </section>}
-      {tab === 'offline' && <section aria-label="离线缓存管理">
-        <p>缓存保存在当前设备、当前账号。关闭此面板会暂停任务，已下载内容保留。</p>
-        {rangedDownload && <div className="reading-tool-range"><label>起始章<input type="number" min={1} max={props.manifest.content?.total} value={from} onInput={e => setFrom(Number(e.currentTarget.value))} /></label><label>结束章<input type="number" min={from} max={props.manifest.content?.total} value={to} onInput={e => setTo(Number(e.currentTarget.value))} /></label></div>}
-        <div className="reading-tool-actions">{download?.status === 'running' ? <><button className="button" onClick={() => void action(() => task.pause())}>暂停</button><button className="button" onClick={() => void action(() => task.pause(true))}>取消任务</button></> : <button className="button primary" disabled={!downloadReady} onClick={() => void action(async () => { await task.start(rangedDownload ? from : 1, rangedDownload ? to : 1); await storage(); })}>下载 / 继续</button>}</div>
-        {download && <p role="status">{download.message} · {download.completed}/{download.total}</p>}
-        <p>当前账号缓存占用 {(usage / 1024 / 1024).toFixed(1)} MiB</p>
-        <details className="reading-tool-advanced"><summary>存储管理与配额</summary><div><label>设备账号配额（MiB）<input type="number" min={1} max={10240} value={quota} onInput={e => setQuota(Number(e.currentTarget.value))} /></label>
-        <button className="button" onClick={() => void action(async () => { await props.cache.setQuota(quota * 1024 * 1024); setMessage('配额已保存'); })}>保存配额</button>
-        <ul>{books.map(book => <li key={book.id}>{props.offline.current.books[book.id]?.title ?? (book.id === bookId ? props.manifest.book.title : book.id)} · {(book.bytes / 1024 / 1024).toFixed(1)} MiB <button className="button" disabled={download?.status === 'running'} onClick={() => setRemoveId(book.id)}>清理缓存</button></li>)}</ul>
-        </div></details>
+      {tab === 'offline' && <section aria-label="离线与下载">
+        <p>三个去处：下载到服务器（NAS 保留，所有设备共用）、缓存到浏览器（关闭浏览器自动清除）、下载到本地（保存为文件）。后两者会先把章节下载到服务器，再从这里取，不会重复请求上游。</p>
+        {ranged && <div className="reading-tool-range"><label>起始章<input type="number" min={1} max={totalChapters} value={from} onInput={e => setFrom(Number(e.currentTarget.value))} /></label><label>结束章<input type="number" min={from} max={totalChapters} value={to} onInput={e => setTo(Number(e.currentTarget.value))} /></label></div>}
+        {book.format === 'chapters'
+          ? <p>服务器已缓存 {server?.chapters ?? 0} / {server?.total ?? totalChapters} 章 · {formatBytes(server?.bytes ?? 0)}</p>
+          : <p>这本书的文件已经在服务器上，不需要再下载到服务器。</p>}
+        <div className="reading-tool-actions">
+          {transfer?.status === 'running' ? <button className="button" onClick={() => void action(() => task.pause())}>停止</button> : <>
+            {book.format === 'chapters' && <button className="button" disabled={!from || to < from} onClick={() => void startTransfer('server')}>下载到服务器</button>}
+            <button className="button primary" disabled={!from || to < from} onClick={() => void startTransfer('session')}>缓存到浏览器</button>
+            <button className="button" disabled={!from || to < from} onClick={() => void startTransfer('download')}>下载到本地</button>
+          </>}
+        </div>
+        {transfer && <p role="status">{transfer.message}{transfer.status === 'running' && transfer.total > 1 ? ` · ${transfer.completed}/${transfer.total}` : ''}</p>}
+        {!!transfer?.failed.length && <details className="reading-tool-advanced"><summary>{transfer.failed.length} 章下载失败，可重试</summary><ul>{transfer.failed.slice(0, 100).map((failure, index) => <li key={index}>{failure.title} · {failure.code}</li>)}</ul></details>}
+        <p>本次浏览器会话缓存 {formatBytes(props.cache.sessionBytes(bookId))} <button className="button" onClick={() => void action(async () => { props.cache.clearSession(bookId); })}>清除会话缓存</button></p>
+        {clearServer && <ConfirmSheet danger title="清除服务器缓存" text="只删除服务器上这本书的章节缓存，书籍本身和阅读进度都不受影响；下次阅读会重新向书源请求。" confirmText="确认清除" onCancel={() => setClearServer(false)} onConfirm={() => { setClearServer(false); void action(async () => { await task.clearServer(); setServer(await task.serverInfo()); }); }} />}
+        {!!server?.chapters && <button className="button" onClick={() => setClearServer(true)}>清除服务器缓存（{server.chapters} 章）</button>}
+        {usage > 0 && <details className="reading-tool-advanced"><summary>清理设备上的旧缓存（{formatBytes(usage)}）</summary><div>
+        <p>旧版本曾把读过的章节留在这台设备上。这些内容已不再被使用，删除只影响本设备，不会动服务器缓存、阅读进度和笔记。</p>
+        <ul>{books.map(book => <li key={book.id}>{props.offline.current.books[book.id]?.title ?? (book.id === bookId ? props.manifest.book.title : book.id)} · {(book.bytes / 1024 / 1024).toFixed(1)} MiB <button className="button" disabled={transfer?.status === 'running'} onClick={() => setRemoveId(book.id)}>清理缓存</button></li>)}</ul>
+        </div></details>}
       </section>}
       {tab === 'edit' && <section aria-label="内容整理">
         <p>个人整理规则保存在服务器，联网时保存；原书保持不变。清空替换内容可过滤选中的文字。</p>
@@ -172,7 +217,10 @@ export function ReadingTools(props: ReadingToolsProps) {
         <ul>{props.overrides.corrections.map(c => <li key={c.id}>{c.anchor.quote.slice(0,60)} → {c.replacement.slice(0,60) || '（过滤）'} <button className="button" disabled={saving} onClick={() => void edit(() => props.saveOverrides({ ...props.overrides,corrections:props.overrides.corrections.filter(item => item.id !== c.id) }))}>移除此项</button></li>)}</ul>
         <button className="button" disabled={saving || props.overrides.version === 0} onClick={() => void edit(async () => { await props.undoOverrides(); setMessage('已撤销上一次整理修改'); })}>撤销上一次整理修改</button>
         {props.manifest.book.format === 'txt' && <>
-          <h3>TXT 目录规则</h3><p>匹配以指定文字开头、长度不超过 80 字的行；留空恢复自动识别。应用会重新划分章节并从首章打开，旧笔记仍保留。</p>
+          <h3>手动分章</h3><p>在正文选中一段文字后点「分章」，这一段就成为新章节的开头，之后的内容都属于新章节。分割点保存在服务器，由服务器重新划分章节，原书不变，也不会为此下载整本文件。</p>
+          <ul>{props.overrides.chapterMarks.map(mark => <li key={mark.id}>{mark.title} <button className="button" disabled={saving} onClick={() => void edit(() => props.saveOverrides({ ...props.overrides, chapterMarks: props.overrides.chapterMarks.filter(item => item.id !== mark.id) }))}>移除此分割点</button></li>)}</ul>
+          {!props.overrides.chapterMarks.length && <p>还没有手动分割点。</p>}
+          <h3>TXT 目录规则</h3><p>匹配以指定文字开头、长度不超过 80 字的行；留空恢复自动识别。规则保存在服务器，应用后由服务器重新划分章节并从首章打开，旧笔记仍保留；预览由服务器直接计算，不需要下载文件。</p>
           <label>常用模板<select value="" onChange={e => { setPrefix(e.currentTarget.value); setHeadingPreview(null); }}><option value="">自动识别</option><option value="第">中文章回</option><option value="Chapter ">英文 Chapter</option><option value="【">方括号标题</option></select></label>
           <label>标题开头<input maxLength={60} value={prefix} onInput={e => { setPrefix(e.currentTarget.value); setHeadingPreview(null); }} /></label>
           <button className="button" disabled={saving} onClick={() => void edit(async () => setHeadingPreview(await props.previewHeadings(prefix)))}>预览目录</button>

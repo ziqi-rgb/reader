@@ -1,6 +1,5 @@
 import { readThemePreference, resolveAppTheme, resolveReaderSurface, resolveReadingTheme, saveThemePreference, subscribeTheme, systemPrefersDark } from '../shared/theme/theme.ts';
-import { applyCorrections, emptyOverrides, type ReadingOverrides } from './reading-overrides.ts';
-import { loadTxt } from '../formats/txt.ts';
+import { applyCorrections, emptyOverrides, normaliseOverrides, type ReadingOverrides } from './reading-overrides.ts';
 import { ApiError } from '../api/errors.ts';
 import { dismissNotice, notify } from './notifications.ts';
 import { renditionRef } from './rendition.ts';
@@ -32,6 +31,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { ReaderChrome, type ChromeState, type ChromeTocEntry } from './reader-chrome.tsx';
 import { OFFLINE_FILE, PublicationCache, publicationScope } from '../store/publications.ts';
+import { SessionCache } from '../store/session-cache.ts';
 import { ReadingTools, type SearchSection } from './reading-tools.tsx';
 import { decodeAnchor, encodeAnchor, searchableText, type TextAnchor } from './text-anchor.ts';
 import { AnnotationPopover, type AnnotationTarget } from './annotation-popover.tsx';
@@ -221,6 +221,8 @@ export class ReaderScreen {
   private readonly listeners: Array<() => void> = [];
   private readonly viewListeners: Array<() => void> = [];
   private readonly publicationCache: PublicationCache;
+  /** The book as cached for this browser session only; cleared when the browser closes. */
+  private readonly sessionCache: SessionCache;
   private loadingToken = 0;
   private overrides: ReadingOverrides = emptyOverrides();
   private toolsOpen = false;
@@ -238,10 +240,13 @@ export class ReaderScreen {
 
   constructor(private readonly options: ReaderScreenOptions) {
     this.settings = { ...options.settings };
+    const scope = publicationScope(options.api.baseUrl || (typeof location !== 'undefined' ? location.origin : ''), options.api.currentSession()?.user.id ?? '');
+    this.sessionCache = new SessionCache(scope);
     this.publicationCache = new PublicationCache(
       options.platform.kv,
       options.platform.blobs,
-      publicationScope(options.api.baseUrl || (typeof location !== 'undefined' ? location.origin : ''), options.api.currentSession()?.user.id ?? ''),
+      scope,
+      this.sessionCache,
     );
 
     // The stage is created here and never re-created: `ReaderView` attaches to it
@@ -286,8 +291,9 @@ export class ReaderScreen {
 <ReaderChrome
           tools={<>{this.annotation && <AnnotationPopover key={this.annotation.note?.id ?? encodeAnchor(this.annotation.anchor)} target={this.annotation}
             save={(type, comment, color) => this.saveAnnotation(type, comment, color)} remove={() => this.removeAnnotation()}
+            {...(this.book?.format === 'txt' ? { splitChapter: () => this.markChapterStart() } : {})}
             close={() => { this.annotation = null; this.view?.clearSelection(); this.patch({}); }} />}{this.toolsOpen && this.manifest ? <ReadingTools
-            api={this.options.api} cache={this.publicationCache} offline={this.options.offline}
+            api={this.options.api} cache={this.publicationCache} offline={this.options.offline} session={this.sessionCache}
             sync={this.options.sync} manifest={this.manifest} selection={this.toolsSelection}
             locator={this.view?.position()?.locator ?? ''} returnLocator={this.toolsReturn}
             sections={signal => this.searchSections(signal)} navigate={target => this.navigateTool(target)}
@@ -388,12 +394,15 @@ export class ReaderScreen {
       if (token !== this.loadingToken) return;
       const storedOverrides = await this.publicationCache.overrides(book.id) ?? emptyOverrides();
       if (token !== this.loadingToken) return;
-      this.overrides = storedOverrides;
+      this.overrides = normaliseOverrides(storedOverrides);
       try {
         const remote = await this.options.api.readingOverrides(book.id);
         if (token !== this.loadingToken) return;
         if (remote && Number.isSafeInteger(remote.version) && Array.isArray(remote.corrections)) {
-          this.overrides = remote; await this.publicationCache.putOverrides(book.id,remote).catch(() => undefined);
+          // Normalised on the way in: a server older than a field answers without
+          // it, and the reader's own chapter breaks must not become `undefined`
+          // just because the overlay was saved before they existed.
+          this.overrides = normaliseOverrides(remote); await this.publicationCache.putOverrides(book.id,this.overrides).catch(() => undefined);
         }
       } catch (error) { if (error instanceof ApiError && error.isAuthFailure) throw error; }
       if (token !== this.loadingToken) return;
@@ -454,11 +463,18 @@ export class ReaderScreen {
    * omnibus would otherwise be a 50MB download to show one page of chapter one.
    */
   private async openStaged(book: Book, token: number): Promise<{ doc: BookDoc } | null> {
-    if (book.format === 'txt' && this.overrides.headingPrefix) return null;
     if (!['chapters', 'txt'].includes(book.format) && await this.publicationCache.resource(book.id, OFFLINE_FILE)) return null;
     const manifest = this.manifest;
     const content = manifest?.content;
     if (!content || !isStagedKind(content.kind)) return null;
+
+    // A windowed response with no items has nothing to read: sections would be an
+    // empty array, and the reader would show a blank page with 0 章 in the
+    // contents panel — which is what a heading-less TXT used to open to before
+    // the server started publishing its 正文 chapter. A server older than that
+    // still answers this way, so the file is read from its bytes instead, which
+    // this client can always do.
+    if ((content.items ?? []).length === 0) return null;
 
     // The manifest's own items are the fallback *and* the sanity check.
     //
@@ -539,10 +555,11 @@ export class ReaderScreen {
     const cached = await this.publicationCache.resource(book.id, ref);
     const blob = cached ? new Blob([toArrayBuffer(cached)]) : await this.options.api.asset(book.id, ref);
     if (!cached) {
-      // Cached per section, not per book, so a partially read book is partially
-      // readable offline and re-opening one does not re-fetch what was read.
-      const bytes = new Uint8Array(await blob.arrayBuffer());
-      await this.publicationCache.putResource(book.id, ref, bytes).catch(() => undefined);
+      // Kept for this browser session only — memory plus `sessionStorage`. The
+      // server is the copy of record and every device reads from it; a chapter
+      // text left on disk was a copy nobody asked for and nobody could find.
+      // Re-reading the same chapter in this session still costs no request.
+      this.publicationCache.putSessionResource(book.id, ref, new Uint8Array(await blob.arrayBuffer()));
     }
     if (item.kind === 'page') {
       return { image: { mediaType: item.mediaType, bytes: new Uint8Array(await blob.arrayBuffer()) } };
@@ -581,17 +598,23 @@ export class ReaderScreen {
     this.element.remove();
   }
 
+  /**
+   * The chapter titles a candidate heading prefix would produce.
+   *
+   * Asked of the server, not computed here: the file is already on the server and
+   * the split has to be the server's (the reader navigates by *its* chapter
+   * references), so a preview is one request and a hundred titles rather than a
+   * whole novel downloaded to answer a question about its first screen.
+   */
   private async previewHeadings(prefix: string): Promise<string[]> {
-    if (!this.book || !this.manifest) throw new Error('阅读器已关闭');
-    const bytes = await this.fetchBookBytes(this.book,this.manifest);
-    const result = loadTxt({ bytes,bookId:this.book.id,fileName:'preview.txt' },{ headingPrefix:prefix, ...(this.settings.txtEncoding ? {encoding:this.settings.txtEncoding} : {}) });
-    return result.doc.toc.map(entry => entry.label);
+    if (!this.book) throw new Error('阅读器已关闭');
+    return this.options.api.tocPreview(this.book.id, prefix);
   }
-  private async saveOverrides(value: ReadingOverrides): Promise<void> {
+  private async saveOverrides(value: ReadingOverrides, focusTitle?: string): Promise<void> {
     if (!this.book) return;
     const token = this.loadingToken;
     const next = await this.options.api.saveReadingOverrides(this.book.id,value);
-    if (token === this.loadingToken) await this.applyOverrides(next);
+    if (token === this.loadingToken) await this.applyOverrides(next, focusTitle);
   }
   private async undoOverrides(): Promise<void> {
     if (!this.book) return;
@@ -599,23 +622,81 @@ export class ReaderScreen {
     const next = await this.options.api.undoReadingOverrides(this.book.id,this.overrides.version);
     if (token === this.loadingToken) await this.applyOverrides(next);
   }
-  private async applyOverrides(next: ReadingOverrides): Promise<void> {
+  /**
+   * Apply a saved overlay locally.
+   *
+   * The two things that can change are the *content* (a correction rewrites a
+   * passage in place) and the *structure* (a heading prefix or a chapter break
+   * re-splits the book), and they need opposite handling: the first keeps the
+   * reader where they are, the second invalidates every section id there is.
+   *
+   * A structure change means the server's chapter list changed too — it is the
+   * server that splits a book by these rules — so the manifest is fetched again
+   * before anything is drawn. Reusing the old one would show the old division
+   * under the new rule, and no chapter reference would line up.
+   *
+   * `focusTitle` is for a break the reader just placed. The structure changed, so
+   * no saved index means anything any more; the one place they want to be is the
+   * chapter they just created, and it is found by the title they gave it.
+   */
+  private async applyOverrides(next: ReadingOverrides, focusTitle?: string): Promise<void> {
     const book = this.book; if (!book) return;
-    const oldPrefix = this.overrides.headingPrefix;
+    const previous = this.overrides;
+    const structureChanged = previous.headingPrefix !== next.headingPrefix
+      || JSON.stringify(previous.chapterMarks) !== JSON.stringify(next.chapterMarks);
     this.overrides = next;
     await this.publicationCache.putOverrides(book.id,next).catch(() => undefined);
-    if (oldPrefix !== next.headingPrefix) {
+    if (structureChanged) {
       await this.flushProgress();
       this.content = null; this.patch({toc:[]});
-      if (!this.manifest) return;
+      this.manifest = await this.loadManifest(book);
       const staged = await this.openStaged(book,this.loadingToken);
       this.doc = staged?.doc ?? (await this.loadDoc(book,this.manifest,await this.fetchBookBytes(book,this.manifest))).doc;
-      this.afterDocLoaded(); await this.view?.open(0,0); this.toolsReturn = '';
+      this.afterDocLoaded();
+      const index = focusTitle ? (this.doc?.sections.findIndex(section => section.label === focusTitle) ?? -1) : -1;
+      await this.view?.open(index >= 0 ? index : 0, 0);
+      this.toolsReturn = '';
     } else {
       const position = this.view?.position();
       if (position) await this.view?.openLocator(position.locator);
     }
     this.toolsSelection = null; this.paintNotes(); this.patch({});
+  }
+
+  /**
+   * Make the selected passage the beginning of a chapter.
+   *
+   * The selection *is* the chapter: it names the chapter and everything from it
+   * onwards belongs to it. That is the whole of the rule, because the reader is
+   * the only party that knows where a story breaks — the heading scan answers for
+   * books that announce their chapters, and a 单章 story has nothing to announce.
+   * The break is stored as the passage itself (see `TxtChapterMark`), so it
+   * survives re-splitting and a different device; the client reads the file and
+   * cuts where the passage is.
+   */
+  private async markChapterStart(): Promise<void> {
+    if (!this.book || !this.annotation) return;
+    const anchor = this.annotation.anchor;
+    const title = anchor.quote.replace(/\s+/g, ' ').trim().slice(0, 60);
+    if (!title) return;
+    const mark = {
+      id: newId(),
+      title,
+      quote: anchor.quote.slice(0, 400),
+      prefix: anchor.prefix.slice(-32),
+      suffix: anchor.suffix.slice(0, 32),
+    };
+    this.annotation = null;
+    this.view?.clearSelection();
+    this.patch({});
+    try {
+      await this.saveOverrides({ ...this.overrides, chapterMarks: [...this.overrides.chapterMarks, mark] }, title);
+      this.flashStatus('这一段已设为新章节的开头', 2400);
+    } catch (error) {
+      // The popover that started this is already gone (the selection ended), so
+      // the failure has to be reported where the reader is looking.
+      this.flashStatus(error instanceof Error ? error.message : '分章失败', 4000);
+    }
   }
 
   private openTools(): void {
@@ -812,7 +893,9 @@ export class ReaderScreen {
     try {
       const blob = await this.options.api.refreshChapter(book.id, item.resourceRef ?? item.href, { signal: run.signal });
       if (token !== this.loadingToken || run.signal.aborted) return;
-      await this.publicationCache.putResource(book.id, renditionRef(item), new Uint8Array(await blob.arrayBuffer()));
+      // The refreshed chapter goes into the session cache, so re-reading it in this
+      // sitting does not ask again — and nothing is left on disk afterwards.
+      this.publicationCache.putSessionResource(book.id, renditionRef(item), new Uint8Array(await blob.arrayBuffer()));
       const toc = content.items.map(value => ({ id: value.href, label: value.title, depth: 0, spine: value.seq }));
       const doc = createStagedDoc({ kind: content.kind, content, toc, orderedByBook: true, loader: { read: value => this.readStagedSection(book, value) } });
       (doc as BookDoc & { staged?: unknown }).staged = doc;
@@ -959,16 +1042,13 @@ export class ReaderScreen {
 
   private async fetchBookBytes(book: Book, manifest: Manifest): Promise<Uint8Array> {
 
-    // Offline first, always. A cached book must open with no network at all —
-    // that is the whole point of the按书粒度 download.
+    // The whole file is only fetched for formats the windowed contract cannot
+    // serve, so it is held for this session like any other chapter text — never
+    // written to disk, because the server already has the file.
     const cached = await this.publicationCache.resource(book.id, OFFLINE_FILE);
-    if (cached && cached.byteLength > 0) {
-      // Refresh in the background only when the file has not been superseded.
-      // Book bytes are immutable per hash, so this is genuinely optional.
-      return cached;
-    }
+    if (cached && cached.byteLength > 0) return cached;
     const bytes = await this.options.api.bookBytes(book.id);
-    await this.publicationCache.putResource(book.id, OFFLINE_FILE, bytes).catch(() => undefined);
+    this.publicationCache.putSessionResource(book.id, OFFLINE_FILE, bytes);
     void manifest;
     return bytes;
   }
@@ -999,6 +1079,7 @@ export class ReaderScreen {
         fileName,
         ...(this.settings.txtEncoding ? { encoding: this.settings.txtEncoding } : {}),
         ...(this.overrides.headingPrefix ? { headingPrefix: this.overrides.headingPrefix } : {}),
+        ...(this.overrides.chapterMarks.length > 0 ? { chapterMarks: this.overrides.chapterMarks } : {}),
       },
     );
   }
@@ -1010,9 +1091,16 @@ export class ReaderScreen {
    * partially readable offline, and re-opening it does not re-download pages
    * the reader has already seen.
    */
+  /**
+   * Fetches one page of a directory comic.
+   *
+   * Held for this browser session, page by page: a page is what the reader is
+   * looking at, so crossing back over it must not cost a request, and a comic
+   * read once should not leave its pages on the device afterwards.
+   */
   private async fetchResourceBytes(book: Book, relPath: string): Promise<Uint8Array> {
-    const key = `page:${book.id}:${relPath}`;
-    const cached = await this.options.platform.blobs.get(key);
+    const ref = `page:${relPath}`;
+    const cached = await this.publicationCache.resource(book.id, ref);
     if (cached) return cached;
     const response = await this.options.platform.transport.send({
       url: `/api/v1/books/${encodeURIComponent(book.id)}/file?path=${encodeURIComponent(relPath)}`,
@@ -1021,7 +1109,7 @@ export class ReaderScreen {
       binary: true,
     });
     const bytes = response.bytes ?? new Uint8Array();
-    await this.options.platform.blobs.put(key, bytes);
+    this.publicationCache.putSessionResource(book.id, ref, bytes);
     return bytes;
   }
 
