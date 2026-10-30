@@ -4139,7 +4139,7 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
 .reading-tool-feedback { padding: .6rem .75rem; border-radius: var(--radius-sm); background: var(--reader-surface); color: var(--reader-accent); }
 .annotation-popover { position: fixed; z-index: 60; box-sizing: border-box; padding: .6rem; border: 1px solid var(--reader-line); border-radius: var(--radius-md); box-shadow: 0 6px 28px #0003; background: var(--reader-paper); color: var(--reader-ink); font: var(--text-ui)/1.5 system-ui,sans-serif; }
 .annotation-actions { display: flex; gap: .25rem; }
-.annotation-actions button { flex: 1; min-height: 44px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--reader-accent); font: inherit; cursor: pointer; }
+.annotation-actions button { flex: 1; min-width: 0; white-space: nowrap; min-height: 44px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--reader-accent); font: inherit; cursor: pointer; }
 @media (hover: hover) and (pointer: fine) { .annotation-actions button:hover { background: var(--reader-surface); }}
 .annotation-popover blockquote, .annotation-editor blockquote { margin: .3rem 0 .75rem; padding: .5rem .75rem; border-inline-start: 3px solid var(--reader-accent); max-height: 6rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .annotation-comment { margin: .5rem; max-height: 8rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

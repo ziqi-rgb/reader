@@ -399,6 +399,48 @@ export class ReaderApi {
   }
 
   /**
+   * Keep a chapter range on this server.
+   *
+   * The loop is the caller's, deliberately: caching a 900-chapter novel is a
+   * minutes-long job, and a client that drives it in batches can show progress,
+   * stop, and survive a proxy that would cut one long request in half.
+   */
+  async cacheChapters(id: string, from: number, to: number, options: RequestOptions = {}): Promise<import('./types.ts').ChapterCacheBatch> {
+    return this.call(`/api/v1/books/${encodeURIComponent(id)}/chapter-cache`, 'POST', { from, to }, options);
+  }
+
+  /** What this server already keeps of the book, for the reader's own account. */
+  async chapterCache(id: string, options: RequestOptions = {}): Promise<import('./types.ts').ChapterCacheInfo> {
+    return this.get(`/api/v1/books/${encodeURIComponent(id)}/chapter-cache`, options);
+  }
+
+  async clearChapterCache(id: string, options: RequestOptions = {}): Promise<{ removed: number }> {
+    return this.call(`/api/v1/books/${encodeURIComponent(id)}/chapter-cache`, 'DELETE', undefined, options);
+  }
+
+  /** Every cached chapter as one zip, one `txt` per chapter. */
+  async chapterCacheZip(id: string, options: RequestOptions = {}): Promise<Blob> {
+    const response = await this.request(
+      `/api/v1/books/${encodeURIComponent(id)}/chapter-cache/zip`,
+      'GET', undefined, { ...options, binary: true },
+    );
+    if (response.status >= 400) {
+      // The failure body is JSON even on a binary request, and its message is the
+      // one the reader needs ("服务器还没有这本书的缓存" rather than "下载失败").
+      let message = '下载失败，请先在服务器上缓存这本书';
+      try {
+        const parsed = JSON.parse(new TextDecoder().decode(response.bytes ?? new Uint8Array())) as { error?: { message?: string } };
+        if (parsed.error?.message) message = parsed.error.message;
+      } catch { /* keep the default */ }
+      throw new ApiError(errorForStatus(response.status), message, 'CACHE_DOWNLOAD_FAILED', response.status);
+    }
+    const bytes = response.bytes ?? new Uint8Array();
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes);
+    return new Blob([copy.buffer], { type: 'application/zip' });
+  }
+
+  /**
    * One addressable resource, as bytes.
    *
    * `ref` is opaque and must be passed through unchanged: it is whatever the
@@ -453,6 +495,22 @@ export class ReaderApi {
       options,
     );
     return result.toc;
+  }
+
+  /**
+   * What a candidate heading rule would produce, without saving it.
+   *
+   * Answered by the server so a preview costs one request and a hundred titles
+   * instead of the whole book: the file is already there, and the split has to be
+   * the server's anyway (the reader navigates by its chapter references).
+   */
+  async tocPreview(id: string, headingPrefix: string, options: RequestOptions = {}): Promise<string[]> {
+    const params = new URLSearchParams({ headingPrefix, limit: '100' });
+    const result = await this.get<{ titles: string[] }>(
+      `/api/v1/books/${encodeURIComponent(id)}/toc-preview?${params}`,
+      options,
+    );
+    return result.titles;
   }
 
   /** Marks a shelf book 想读 / 在读 / 已读, or clears the mark (`null`) so progress decides. */

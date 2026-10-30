@@ -5,7 +5,7 @@ import type { BookDoc, LoadContext, Section } from './types.ts';
 /**
  * Plain-text loader.
  *
- * Two problems worth solving properly, because a TXT library is where a reader
+ * Three problems worth solving properly, because a TXT library is where a reader
  * either earns trust or loses it:
  *
  * 1. **Encoding.** See text-encoding.ts. This file has no way to know, so it
@@ -17,6 +17,13 @@ import type { BookDoc, LoadContext, Section } from './types.ts';
  *    too eager and every numbered line becomes a chapter, too timid and a
  *    5000-chapter web novel becomes one endless section that cannot be
  *    navigated or paginated without freezing the device.
+ *
+ * 3. **A story that has no chapters at all.** Not every book is divided, and a
+ *    single-chapter story is a book rather than a failure: it is read as one
+ *    chapter called 正文 — the same name the server gives it — instead of being
+ *    chopped into arbitrary 「第 N 段」 pieces. Its *navigation* comes from the
+ *    reader, who can mark where a chapter begins while reading (see
+ *    `TxtChapterMark`).
  */
 
 /**
@@ -46,9 +53,54 @@ const CHAPTER_PATTERNS: RegExp[] = [
  */
 const MAX_HEADING_LENGTH = 80;
 
+/**
+ * What a file with no headings of its own is called, chapter-wise.
+ *
+ * Deliberately the same string as the server's `WHOLE_BOOK_TITLE`
+ * (`server/src/indexer/formats/text.ts`): the same file read through the
+ * windowed path and read through this one has to present the same chapter name,
+ * because the reader sees that name in the contents panel, in progress and in
+ * search results, and two names for one chapter would mean a position saved
+ * online opened somewhere else locally.
+ */
+const WHOLE_BOOK_TITLE = '正文';
+
+/**
+ * A single chapter still needs a ceiling, or one 3MB story has to be laid out in
+ * one pass and the phone's UI thread stops responding.
+ *
+ * Far above anything a chapter normally holds, so an ordinary single-chapter
+ * story really is one section — the cap only exists to keep an extreme file
+ * readable at all, and a chunked one says so in its label.
+ */
+const WHOLE_BOOK_CHUNK = 400_000;
+
+/**
+ * A chapter break the reader placed themselves.
+ *
+ * Stored as the selected text rather than as an offset: the selection was made
+ * against the rendered document, and the offsets of that document change the
+ * moment a break is added, so an offset would point into a different paragraph
+ * next time the book opens. The quote is found in the file's own characters.
+ */
+export interface TxtChapterMark {
+  /** Identifier of the stored mark, when it has one; not used for splitting. */
+  id?: string;
+  /** Heading to show for the chapter this break starts. */
+  title: string;
+  /** The passage the reader selected; where the chapter begins. */
+  quote: string;
+  /** Context before the quote, used to tell two identical passages apart. */
+  prefix?: string;
+  /** Context after the quote. */
+  suffix?: string;
+}
+
 export interface TxtOptions {
   /** Literal heading prefix; bounded lines avoid untrusted regular expressions. */
   headingPrefix?: string;
+  /** Chapter breaks the reader placed by hand. */
+  chapterMarks?: readonly TxtChapterMark[];
   /** Force an encoding label such as `gb18030`; detected when omitted. */
   encoding?: string;
   /** Split into chapters. When false the whole book is one section. */
@@ -69,33 +121,38 @@ export function loadTxt(ctx: LoadContext, options: TxtOptions = {}): TxtSplitRes
   const text = normaliseLineEndings(decoded.text);
   const splitChapters = options.splitChapters !== false;
 
-  const lines = text.split('\n');
-  const chapters: Array<{ title: string; start: number }> = [];
-  let offset = 0;
+  const found: Array<{ title: string; start: number }> = [];
 
   if (splitChapters) {
-    for (const line of lines) {
+    let offset = 0;
+    for (const line of text.split('\n')) {
       const trimmed = line.trim();
       if (trimmed.length > 0 && trimmed.length <= MAX_HEADING_LENGTH && (options.headingPrefix ? trimmed.startsWith(options.headingPrefix) : matchHeading(trimmed))) {
-        chapters.push({ title: trimmed, start: offset });
+        found.push({ title: trimmed, start: offset });
       }
       offset += line.length + 1;
     }
   }
 
+  // The reader's own breaks, which apply even with heading detection switched
+  // off: turning off inference says "do not guess", not "ignore what I said".
+  found.push(...locateMarks(text, options.chapterMarks ?? []));
+
+  // One ordered list of starts. Two breaks at the same offset are one break;
+  // the first title wins, and an inferred heading is pushed first so a mark
+  // placed on a heading line keeps the heading's own text.
+  found.sort((left, right) => left.start - right.start);
+  const chapters: Array<{ title: string; start: number }> = [];
+  for (const entry of found) {
+    if (chapters[chapters.length - 1]?.start !== entry.start) chapters.push(entry);
+  }
+
   const sections: Section[] = [];
   if (chapters.length === 0) {
-    // No headings found: either the book simply has none, or the heuristic
-    // missed. Either way one giant section is unusable, so fall back to fixed
-    // chunks that keep the renderer responsive.
-    for (const chunk of chunkByLength(text, 40_000)) {
-      sections.push({
-        id: `chunk-${sections.length}`,
-        label: chunk.label,
-        html: textToChapterHtml(chunk.text),
-        depth: 0,
-      });
-    }
+    // No headings and no marks: the whole file is one chapter. Not a guess —
+    // the file has exactly one chapter, and saying so is the only honest
+    // description of it.
+    sections.push(...wholeBookSections(text));
   } else {
     if (chapters[0]!.start > 0) {
       const preface = text.slice(0, chapters[0]!.start).trim();
@@ -139,6 +196,98 @@ export function loadTxt(ctx: LoadContext, options: TxtOptions = {}): TxtSplitRes
       orderedByBook: chapters.length > 0,
     },
   };
+}
+
+/** The whole file as one chapter, chunked only if it is extreme. */
+function wholeBookSections(text: string): Section[] {
+  const parts = chunkByLength(text, WHOLE_BOOK_CHUNK);
+  return parts.map((part, index) => ({
+    // Ids stay in the `chunk-` namespace a position saved before this change
+    // already uses, so a reader who was in the middle of the story stays there.
+    id: `chunk-${index}`,
+    label: parts.length > 1 ? `${WHOLE_BOOK_TITLE} (${index + 1}/${parts.length})` : WHOLE_BOOK_TITLE,
+    html: textToChapterHtml(part.text),
+    depth: 0,
+  }));
+}
+
+/**
+ * Where each mark's chapter begins, as a character offset into the file.
+ *
+ * A mark that cannot be found is dropped: the text it named is no longer in the
+ * file (the book was replaced, or the reader's client picked up a different
+ * edition), and a break at a guessed position would cut the story somewhere the
+ * reader never asked for.
+ */
+function locateMarks(text: string, marks: readonly TxtChapterMark[]): Array<{ title: string; start: number }> {
+  const located: Array<{ title: string; start: number }> = [];
+  for (const mark of marks) {
+    const quote = mark.quote?.trim() ?? '';
+    if (!quote) continue;
+    const at = locateQuote(text, quote);
+    if (at < 0) continue;
+    // A chapter starts at the beginning of a line, not mid-sentence: the reader
+    // selected a passage that begins inside a paragraph, and cutting there would
+    // leave that paragraph's opening behind in the previous chapter.
+    located.push({ title: headingFor(mark), start: lineStart(text, at) });
+  }
+  return located;
+}
+
+/**
+ * The offset of `quote` in `text`, tolerating the difference between a rendered
+ * selection and the file.
+ *
+ * The quote comes from the reader's document, where paragraphs are separated by
+ * elements and not by newlines, so a selection spanning two paragraphs does not
+ * occur verbatim in the file. It is matched ignoring whitespace, which is also
+ * what makes this work for a file whose lines are wrapped anywhere.
+ *
+ * The probe is the quote's first few characters, and it is what keeps this cheap:
+ * a candidate is found with `indexOf` and verified from there, so an ordinary
+ * single occurrence costs one scan of the file. Shorter probes are only tried
+ * when a longer one finds nothing at all — which happens when the file happens to
+ * break a line inside the probe itself.
+ */
+function locateQuote(text: string, quote: string): number {
+  const needle = quote.replace(/\s+/g, '');
+  if (!needle) return -1;
+  for (let width = Math.min(4, needle.length); width >= 1; width -= 1) {
+    const probe = needle.slice(0, width);
+    let from = text.indexOf(probe);
+    while (from >= 0) {
+      if (matchesIgnoringWhitespace(text, from, needle)) return from;
+      from = text.indexOf(probe, from + 1);
+    }
+  }
+  return -1;
+}
+
+function matchesIgnoringWhitespace(text: string, start: number, needle: string): boolean {
+  let matched = 0;
+  for (let index = start; index < text.length && matched < needle.length; index += 1) {
+    const character = text[index]!;
+    if (/\s/.test(character)) continue;
+    if (character !== needle[matched]) return false;
+    matched += 1;
+  }
+  return matched === needle.length;
+}
+
+function lineStart(text: string, offset: number): number {
+  return text.lastIndexOf('\n', offset - 1) + 1;
+}
+
+/**
+ * A mark's own title, or one derived from the passage it points at.
+ *
+ * Capped like a heading: a section label is drawn in a contents panel, and the
+ * reader's selection can be a paragraph long.
+ */
+function headingFor(mark: TxtChapterMark): string {
+  const title = (mark.title ?? '').replace(/\s+/g, ' ').trim();
+  if (title) return title.slice(0, 60);
+  return (mark.quote ?? '').replace(/\s+/g, ' ').trim().slice(0, 30) || '新章节';
 }
 
 function matchHeading(line: string): boolean {

@@ -261,13 +261,47 @@ describe('TXT loading', () => {
     expect(result.doc.sections[1]!.label).toBe('第一章 起始');
   });
 
-  it('chunks by length when there are no headings at all', () => {
+  it('reads a story with no headings at all as one 正文 chapter', () => {
     const body = '一句话。'.repeat(30_000);
     const result = loadTxt(ctx(utf8(body), 'b.txt'));
     expect(result.chapterCount).toBe(0);
-    // A single unbounded section would freeze layout on a phone, so the loader
-    // must break it up.
-    expect(result.doc.sections.length).toBeGreaterThan(1);
+    // A single-chapter story is a book, not a failure: it is one chapter, and its
+    // name says that instead of inventing 「第 N 段」 splits the text never had.
+    expect(result.doc.sections.map((section) => section.label)).toEqual(['正文']);
+  });
+
+  it('splits a heading-less story where the reader marked a chapter start', () => {
+    const body = ['开头一段。', '中间一段。', '新的开始。', '结尾一段。'].join('\n');
+    const result = loadTxt(ctx(utf8(body), 'b.txt'), {
+      chapterMarks: [{ id: 'm1', title: '新的开始。', quote: '新的开始。', prefix: '中间一段。\n', suffix: '\n结尾' }],
+    });
+    expect(result.doc.toc.map((entry) => entry.label)).toEqual(['前言', '新的开始。']);
+    // The mark names the chapter and everything from it onwards belongs to it.
+    const second = result.doc.sections[1]!;
+    expect(second.html).toContain('新的开始');
+    expect(second.html).toContain('结尾一段');
+    expect(result.doc.sections[0]!.html).toContain('开头一段');
+  });
+
+  it('keeps every passage of a heading-less story reachable by one chapter or by marks', () => {
+    // A mark that no longer exists in the file is dropped rather than approximated:
+    // a break at a guessed offset cuts the story where the reader never asked.
+    const result = loadTxt(ctx(utf8('甲乙丙丁。\n戊己庚辛。'), 'b.txt'), {
+      chapterMarks: [{ id: 'm', title: '不存在', quote: '找不到的句子', prefix: '', suffix: '' }],
+    });
+    expect(result.doc.sections.map((section) => section.label)).toEqual(['正文']);
+    expect(result.doc.sections[0]!.html).toContain('戊己庚辛');
+  });
+
+  it('places a mark that spans paragraphs by its own characters, not by newlines', () => {
+    // The selection comes from the rendered document, where paragraphs are
+    // elements: a two-paragraph quote has no newline in it at all.
+    const body = ['第一段。', '第二段。', '第三段。'].join('\n');
+    const result = loadTxt(ctx(utf8(body), 'b.txt'), {
+      chapterMarks: [{ id: 'm', title: '第一段。第二段。', quote: '第一段。第二段。', prefix: '', suffix: '' }],
+    });
+    expect(result.doc.toc.map((entry) => entry.label)).toEqual(['第一段。第二段。']);
+    expect(result.doc.sections[0]!.html).toContain('第三段');
   });
 
   it('escapes markup so a TXT file cannot inject HTML', () => {

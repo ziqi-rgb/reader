@@ -5,10 +5,20 @@ import { ConfirmSheet, Sheet } from './sheet.tsx';
 import { FloatingNotice } from './floating-notice.tsx';
 
 export interface AnnotationTarget { anchor: TextAnchor; rect: DOMRect; note?: Note }
-export function AnnotationPopover({ target, save, remove, close }: {
+export function AnnotationPopover({ target, save, remove, splitChapter, close }: {
   target: AnnotationTarget;
   save(type: 'highlight' | 'note' | 'bookmark', comment: string, color: string): Promise<void>;
-  remove(): Promise<void>; close(): void;
+  remove(): Promise<void>;
+  /**
+   * Make the selected passage the start of a new chapter.
+   *
+   * Offered beside the annotation actions because a chapter break is placed the
+   * same way they are — by selecting the line the story continues from — and a
+   * reader who has just found the place a new chapter begins should not have to
+   * leave the passage to say so.
+   */
+  splitChapter?(): Promise<void>;
+  close(): void;
 }) {
   const [editing, setEditing] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [comment, setComment] = useState(target.note?.comment ?? ''), [color, setColor] = useState(target.note?.color || '#ffd54f');
@@ -53,6 +63,7 @@ export function AnnotationPopover({ target, save, remove, close }: {
       {!target.note && <button disabled={busy} onClick={() => void work(() => save('highlight', '', color))}>高亮</button>}
       <button disabled={busy} onClick={() => setEditing(true)}>{target.note ? '编辑批注' : '批注'}</button>
       {!target.note && <button disabled={busy} onClick={() => void work(() => save('bookmark', '', ''))}>书签</button>}
+      {!target.note && splitChapter && <button disabled={busy} onClick={() => void work(splitChapter)}>分章</button>}
       {target.note && <button disabled={busy} onClick={() => setConfirmDelete(true)}>删除</button>}
       <button disabled={busy} aria-label="关闭选区工具" onClick={close}>关闭</button>
     </div>

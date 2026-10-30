@@ -386,4 +386,11 @@ export interface BookSearchPage {
   failures: Array<{title: string; code: string}>;
 }
 
-export interface ReadingOverrides { version: number; corrections: Array<{ id: string; anchor: { sectionId: string; start: number; end: number; quote: string; prefix: string; suffix: string }; replacement: string }>; headingPrefix: string }
+/** A place the reader decided a new chapter starts; see `TxtChapterMark`. */
+export interface ChapterMark { id: string; title: string; quote: string; prefix: string; suffix: string }
+export interface ReadingOverrides { version: number; corrections: Array<{ id: string; anchor: { sectionId: string; start: number; end: number; quote: string; prefix: string; suffix: string }; replacement: string }>; headingPrefix: string; chapterMarks: ChapterMark[] }
+
+/** What the server already keeps of one book, in the reader's own directory. */
+export interface ChapterCacheInfo { chapters: number; bytes: number; total: number; /** 1-based chapter numbers already cached. */ indexes: number[] }
+/** One batch of a "download to the server" run. */
+export interface ChapterCacheBatch { total: number; cached: number; failed: Array<{ title: string; code: string }> }

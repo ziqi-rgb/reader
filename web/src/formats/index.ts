@@ -50,7 +50,7 @@ export async function loadBook(ctx: LoadContext, options: LoadOptions = {}): Pro
         notes.push(`按 ${result.encoding} 解码（文件未声明编码，若显示乱码可在设置中切换）`);
       }
       if (result.chapterCount === 0) {
-        notes.push('未识别到章节标记，已按长度分段');
+        notes.push('未识别到章节标记，整本作为一章');
       }
       return { doc: result.doc, notes };
     }
