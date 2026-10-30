@@ -282,4 +282,23 @@ CREATE TABLE IF NOT EXISTS source_access (
   checked_at INTEGER,
   PRIMARY KEY(source_id,user_id)
 );
+
+-- Reader-owned groupings. Deliberately a separate system from embedded metadata:
+-- series and tags come from the file and are rewritten on every rescan, while a
+-- group is the reader's own shelf structure (one book may sit in many groups).
+CREATE TABLE IF NOT EXISTS book_groups (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_book_groups_owner ON book_groups(user_id, name COLLATE NOCASE);
+CREATE TABLE IF NOT EXISTS book_group_members (
+  group_id TEXT NOT NULL REFERENCES book_groups(id) ON DELETE CASCADE,
+  book_id  TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  added_at INTEGER NOT NULL,
+  PRIMARY KEY (group_id, book_id)
+);
+CREATE INDEX IF NOT EXISTS idx_book_group_members_book ON book_group_members(book_id);
 `;

@@ -4,6 +4,7 @@ import type { AppConfig } from '../config/index.ts';
 import type { Scanner } from '../indexer/scanner.ts';
 import type { UserService, PublicUser } from '../services/users.ts';
 import type { ShelfService } from '../services/shelf.ts';
+import type { GroupService } from '../services/groups.ts';
 import type { SyncService } from '../services/sync.ts';
 import type { TtsService } from '../services/tts.ts';
 import type { BrowseService } from '../services/browse.ts';
@@ -19,6 +20,17 @@ export interface AppContext {
   scanner: Scanner;
   users: UserService;
   shelf: ShelfService;
+  /**
+   * The reader's own groupings.
+   *
+   * Separate from `shelf` because a group is not a property of a book: it is a
+   * per-account many-to-many structure the reader maintains, and `shelf` only reads
+   * it to fill `BookDto.groups` and to answer the `groups` filter.
+   *
+   * Optional so a partial context (test harnesses) works: the routes create one on
+   * first use, exactly like `sources`.
+   */
+  groups?: GroupService;
   sync: SyncService;
   tts: TtsService;
   /**

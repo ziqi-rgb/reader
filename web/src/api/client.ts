@@ -8,11 +8,13 @@ import type {
   BatchResult,
   Book,
   BookContent,
+  BookGroup,
   BrowseListing,
   ConflictPolicy,
   BookListPage,
   ContinueReadingItem,
   Facets,
+  GroupMode,
   ReadingState,
   InstanceInfo,
   Manifest,
@@ -60,6 +62,16 @@ export interface ListQuery {
   series?: string;
   tag?: string;
   format?: string;
+  /**
+   * Reader-owned group ids, comma separated (the wire format the server parses).
+   *
+   * `groupMode` decides how several of them combine: 或 (`or`), 与 (`and`),
+   * 非 (`not`). Groups are the only grouping dimension the shelf offers — series and
+   * tags come from the file, so filtering by them was really filtering by whatever
+   * the source file happened to carry.
+   */
+  groups?: string;
+  groupMode?: GroupMode;
   /**
    * Sort key.
    *
@@ -463,6 +475,44 @@ export class ReaderApi {
    */
   async patchBookMetadata(id: string, fields: Record<string, unknown>): Promise<Book> {
     const result = await this.call<{ book: Book }>('/api/v1/books/' + encodeURIComponent(id) + '/metadata', 'PATCH', fields);
+    return result.book;
+  }
+
+  /** Undo one manual field, falling back to the value embedded in the file. */
+  async clearBookMetadataField(id: string, field: string): Promise<Book> {
+    const result = await this.call<{ book: Book }>(
+      '/api/v1/books/' + encodeURIComponent(id) + '/metadata/' + encodeURIComponent(field), 'DELETE',
+    );
+    return result.book;
+  }
+
+  /**
+   * This account's own groups.
+   *
+   * Not the facets: those describe what the *files* carry (authors, series, tags),
+   * while a group is shelf structure the reader maintains.
+   */
+  async bookGroups(options: RequestOptions = {}): Promise<BookGroup[]> {
+    return (await this.get<{ groups: BookGroup[] }>('/api/v1/groups', options)).groups;
+  }
+
+  async createBookGroup(name: string): Promise<BookGroup> {
+    return (await this.call<{ group: BookGroup }>('/api/v1/groups', 'POST', { name })).group;
+  }
+
+  async renameBookGroup(id: string, name: string): Promise<BookGroup> {
+    return (await this.call<{ group: BookGroup }>('/api/v1/groups/' + encodeURIComponent(id), 'PATCH', { name })).group;
+  }
+
+  async deleteBookGroup(id: string): Promise<void> {
+    await this.call('/api/v1/groups/' + encodeURIComponent(id), 'DELETE');
+  }
+
+  /** Replaces one book's groups for this account; other readers keep their own. */
+  async setBookGroups(id: string, groupIds: string[]): Promise<Book> {
+    const result = await this.call<{ book: Book }>(
+      '/api/v1/books/' + encodeURIComponent(id) + '/groups', 'PUT', { groupIds },
+    );
     return result.book;
   }
 

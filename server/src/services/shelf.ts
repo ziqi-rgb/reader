@@ -1,5 +1,6 @@
 import type { Db } from '../db/index.ts';
 import { applyOverrides, type BaseMetadata } from './merge.ts';
+import { groupsOfBooks, type BookGroupRef } from './groups.ts';
 import { safeJsonParse } from '../lib/text.ts';
 import { badRequest, notFound } from '../lib/errors.ts';
 
@@ -22,6 +23,15 @@ export interface BookDto {
   source: string;
   /** Which fields the user overrode by hand; lets the UI offer an undo. */
   manualFields: string[];
+  /**
+   * This account's own groups for the book (zero or more).
+   *
+   * Separate from `series` on purpose: series comes from the file's metadata and a
+   * rescan rewrites it, while a group is the reader's shelf structure and one book
+   * may sit in several. Filled by `list`/`get`/`getMany` so a card and the detail
+   * sheet never disagree about which groups a book is in.
+   */
+  groups?: BookGroupRef[];
   /**
    * When the file last changed on disk.
    *
@@ -157,6 +167,19 @@ export interface ListOptions {
   scope?: 'shelf' | 'library';
   /** 在读 / 想读 / 已读 filter; shelf scope only. */
   status?: ReadingState;
+  /**
+   * Reader-owned group ids (see `GroupService`), combined by `groupMode`.
+   *
+   * Groups are the only grouping dimension: `series` and `tags` come from the file,
+   * so filtering by them was really filtering by whatever the source file happened
+   * to carry.
+   */
+  groups?: string[];
+  /**
+   * How several selected groups combine:
+   * `or` — in any of them, `and` — in all of them, `not` — in none of them.
+   */
+  groupMode?: 'or' | 'and' | 'not';
   page?: number;
   pageSize?: number;
 }
@@ -252,6 +275,34 @@ export class ShelfService {
       where.push('b.tags LIKE ?');
       params.push(`%"${options.tag}"%`);
     }
+    /*
+     * Group filter — the reader's own structure, so the account id is part of the
+     * predicate rather than a join the caller could forget: a group row belongs to
+     * one account and a book may be in several at once.
+     *
+     * `or` / `and` / `not` are the three questions a reader actually asks: "these
+     * groups", "the books in all of them", "what I have not filed here yet".
+     */
+    if (options.groups && options.groups.length > 0) {
+      const mode = options.groupMode ?? 'or';
+      if (mode !== 'or' && mode !== 'and' && mode !== 'not') throw badRequest('invalid group mode');
+      const ids = [...new Set(options.groups)];
+      const placeholders = ids.map(() => '?').join(',');
+      const member = `SELECT 1 FROM book_group_members gm JOIN book_groups g ON g.id = gm.group_id
+         WHERE gm.book_id = b.id AND g.user_id = ? AND g.id`;
+      if (mode === 'and') {
+        for (const id of ids) {
+          where.push(`EXISTS (${member} = ?)`);
+          params.push(userId, id);
+        }
+      } else if (mode === 'not') {
+        where.push(`NOT EXISTS (${member} IN (${placeholders}))`);
+        params.push(userId, ...ids);
+      } else {
+        where.push(`EXISTS (${member} IN (${placeholders}))`);
+        params.push(userId, ...ids);
+      }
+    }
     if (options.path) {
       /*
        * A folder filter, and the only place `rel_path` is matched by prefix.
@@ -324,7 +375,9 @@ export class ShelfService {
       ...joinParams, ...params, pageSize, (page - 1) * pageSize,
     );
 
-    return { items: rows.map((row) => this.toDto(row)), total: totalRow?.n ?? 0, page, pageSize };
+    const items = rows.map((row) => this.toDto(row));
+    this.attachGroups(userId, items);
+    return { items, total: totalRow?.n ?? 0, page, pageSize };
   }
 
   get(userId: string, bookId: string): BookDto {
@@ -338,7 +391,9 @@ export class ShelfService {
       userId, bookId,
     );
     if (!visible?.n) throw notFound('book not found');
-    return this.toDto(row);
+    const dto = this.toDto(row);
+    this.attachGroups(userId, [dto]);
+    return dto;
   }
 
   /**
@@ -368,7 +423,16 @@ export class ShelfService {
        WHERE ub.user_id = ? AND ub.hidden = 0 AND b.id IN (${unique.map(() => '?').join(',')})`,
       userId, ...unique,
     );
-    return new Map(rows.map((row) => [row.id, this.toDto(row)]));
+    const items = rows.map((row) => this.toDto(row));
+    this.attachGroups(userId, items);
+    return new Map(items.map((item) => [item.id, item]));
+  }
+
+  /** Fills `BookDto.groups` for a batch of books in one query. */
+  private attachGroups(userId: string, items: BookDto[]): void {
+    if (items.length === 0) return;
+    const byBook = groupsOfBooks(this.db, userId, items.map((item) => item.id));
+    for (const item of items) item.groups = byBook.get(item.id) ?? [];
   }
 
   /**

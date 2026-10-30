@@ -10,6 +10,7 @@ import { LegacyMediaSettingsRedirect, MediaSettingsPage } from '../../features/m
 import { MediaPlayerPage } from '../../features/media/pages/MediaPlayerPage.tsx';
 import { RouteErrorBoundary } from './error-boundary.tsx';
 import { ShelfPage } from '../../features/shelf/pages/ShelfPage.tsx';
+import { GroupsPage } from '../../features/shelf/pages/GroupsPage.tsx';
 import { LibraryPage, LibraryBrowsePage, LibraryFilesPage } from '../../features/library/pages/LibraryPage.tsx';
 import { SourcesPage } from '../../features/sources/pages/SourcesPage.tsx';
 import { MinePage } from '../../features/account/pages/MinePage.tsx';
@@ -29,6 +30,9 @@ export const routes = [{
   path: '/', element: <AppShell />, errorElement: <RouteErrorBoundary />, children: [
     { index: true, element: <HomePage /> },
     { path: 'shelf', element: <ShelfPage /> },
+    // 分组管理: the reader's own groups (per account, many-to-many). A static child of
+    // `shelf` so react-router prefers it over the shelf route itself.
+    { path: 'shelf/groups', element: <GroupsPage /> },
     { path: 'search', element: <SearchPage /> },
     { path: 'library', element: <LibraryBrowsePage /> },
     { path: 'library/books', element: <LibraryPage /> },

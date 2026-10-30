@@ -88,7 +88,29 @@ export interface Book {
    */
   lastReadAt?: number | null;
   percentage?: number;
+  /**
+   * This account's own groups for the book (empty when unfiled).
+   *
+   * Not `series`: series comes from the file and a rescan rewrites it, while a group
+   * is the reader's own structure and one book may sit in several.
+   */
+  groups?: BookGroupRef[];
 }
+
+/** A group as a book carries it: only the name is drawn. */
+export interface BookGroupRef {
+  id: string;
+  name: string;
+}
+
+/** A group as the management screen sees it. */
+export interface BookGroup extends BookGroupRef {
+  /** How many books this account filed into it. */
+  bookCount: number;
+}
+
+/** How several selected groups combine on the shelf: 或 / 与 / 非. */
+export type GroupMode = 'or' | 'and' | 'not';
 
 export type ReadingState = 'reading' | 'want' | 'finished';
 

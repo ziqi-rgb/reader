@@ -1,0 +1,21 @@
+/* 分组管理页：一个列表 + 一个新建表单，几何留给页面，颜色全部走 token。 */
+.groups-screen { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-4); min-height: 100%; }
+.groups-header { display: flex; align-items: center; gap: var(--space-3); }
+.groups-header h1 { margin: 0; font-size: var(--text-title); }
+.groups-body { display: flex; flex-direction: column; gap: var(--space-3); max-width: 52rem; }
+.groups-intro { font-size: var(--text-sm); line-height: 1.7; }
+.groups-create { display: flex; align-items: flex-end; gap: var(--space-2); flex-wrap: wrap; }
+.groups-create-field { display: grid; gap: .35rem; flex: 1 1 16rem; font-size: var(--text-sm); color: var(--color-muted); }
+.groups-create-field input {
+  padding: .55rem .7rem; border: 1px solid var(--color-line); border-radius: var(--radius-md);
+  background: var(--color-surface); color: var(--color-ink); font-size: var(--text-title);
+}
+.groups-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.groups-row {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
+  padding: .75rem .9rem; border: 1px solid var(--color-line); border-radius: var(--radius-md);
+  background: var(--color-surface); flex-wrap: wrap;
+}
+.groups-row-text { display: flex; align-items: baseline; gap: .6rem; min-width: 0; }
+.groups-row-text strong { overflow-wrap: anywhere; }
+.groups-row-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }

@@ -19,6 +19,7 @@ import { FilePublications } from '../../publications/files.ts';
 import { withSignal } from '../request-signal.ts';
 import { searchBookPage } from '../../services/book-search.ts';
 import { ReadingOverrideService } from '../../services/reading-overrides.ts';
+import { GroupService } from '../../services/groups.ts';
 import { READING_STATES, type ReadingState } from '../../services/shelf.ts';
 
 /**
@@ -98,6 +99,9 @@ function numberParam(value: string | undefined, fallback: number): number {
 
 export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): void {
   const auth = authenticate(ctx);
+  // Same lazy pattern as `ctx.sources`: every harness that builds a partial context
+  // still gets a working instance the first time a group route is hit.
+  const groups = () => (ctx.groups ??= new GroupService(ctx.db));
 
   app.get('/api/v1/library/facets', { preHandler: auth }, async (request) => {
     const user = currentUser(request);
@@ -112,6 +116,12 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
       ...(q.author !== undefined ? { author: q.author } : {}),
       ...(q.series !== undefined ? { series: q.series } : {}),
       ...(q.tag !== undefined ? { tag: q.tag } : {}),
+      // Reader-owned groups: comma-separated ids, combined by `groupMode`
+      // (or / and / not). The shelf's only grouping dimension.
+      ...(q.groups !== undefined
+        ? { groups: q.groups.split(',').map((value) => value.trim()).filter(Boolean) }
+        : {}),
+      ...(q.groupMode !== undefined ? { groupMode: q.groupMode as 'or' | 'and' | 'not' } : {}),
       ...(q.format !== undefined ? { format: q.format } : {}),
       ...(q.path !== undefined ? { path: q.path } : {}),
       // `scope=library` is the *index* rather than the reader's shelf: every book in
@@ -487,7 +497,8 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
     const abs = resolveInside(ctx.config.dataDir, assertSafeRel(row.cover_path));
     if (!existsSync(abs)) throw notFound('cover cache missing', 'NO_COVER');
     const ext = extname(abs).toLowerCase();
-    const mime = ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : ext === '.svg' ? 'image/svg+xml' : 'image/jpeg';
+    const mime = ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : ext === '.webp' ? 'image/webp'
+      : ext === '.svg' ? 'image/svg+xml' : 'image/jpeg';
     reply.header('content-type', mime);
     reply.header('cache-control', 'public, max-age=31536000, immutable');
     return reply.send(createReadStream(abs));
@@ -521,6 +532,56 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
     const { id, field } = request.params as { id: string; field: string };
     ctx.shelf.get(user.id, id);
     ctx.shelf.clearOverride(id, field);
+    return { book: ctx.shelf.get(user.id, id) };
+  });
+
+  // ---- reader-owned groups ----
+
+  /*
+   * Groups are the reader's own shelf structure — not file metadata.
+   *
+   * `series` and `tags` come out of the epub and the scanner rewrites them on every
+   * pass, so neither can be the thing a reader renames or reorganises. A group is
+   * per account and many-to-many: one book may sit in several, which is what makes
+   * the shelf's 或 / 与 / 非 filter meaningful.
+   */
+  app.get('/api/v1/groups', { preHandler: auth }, async (request) => {
+    return { groups: groups().list(currentUser(request).id) };
+  });
+
+  app.post('/api/v1/groups', { preHandler: auth }, async (request, reply) => {
+    const body = (request.body ?? {}) as { name?: unknown };
+    const group = groups().create(currentUser(request).id, body.name);
+    reply.code(201);
+    return { group };
+  });
+
+  app.patch('/api/v1/groups/:id', { preHandler: auth }, async (request) => {
+    const user = currentUser(request);
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as { name?: unknown };
+    return { group: groups().rename(user.id, id, body.name) };
+  });
+
+  /** Unfiles every book from the group; the books themselves stay on the shelf. */
+  app.delete('/api/v1/groups/:id', { preHandler: auth }, async (request) => {
+    const user = currentUser(request);
+    const { id } = request.params as { id: string };
+    groups().remove(user.id, id);
+    return { removed: id };
+  });
+
+  /** Replaces one book's groups *for this account*; other readers keep their own. */
+  app.put('/api/v1/books/:id/groups', { preHandler: auth }, async (request) => {
+    const user = currentUser(request);
+    const { id } = request.params as { id: string };
+    ctx.shelf.get(user.id, id); // an id alone is never permission to write
+    const body = (request.body ?? {}) as { groupIds?: unknown };
+    if (body.groupIds !== undefined && !Array.isArray(body.groupIds)) {
+      throw badRequest('groupIds must be an array');
+    }
+    const groupIds = Array.isArray(body.groupIds) ? body.groupIds : [];
+    groups().setForBook(user.id, id, groupIds);
     return { book: ctx.shelf.get(user.id, id) };
   });
 

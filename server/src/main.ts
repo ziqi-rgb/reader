@@ -3,6 +3,7 @@ import { openDatabase } from './db/index.ts';
 import { Scanner } from './indexer/scanner.ts';
 import { UserService } from './services/users.ts';
 import { ShelfService } from './services/shelf.ts';
+import { GroupService } from './services/groups.ts';
 import { SyncService } from './services/sync.ts';
 import { TtsService } from './services/tts.ts';
 import { BrowseService } from './services/browse.ts';
@@ -52,6 +53,7 @@ async function main(): Promise<void> {
   });
   ctx.users = new UserService(db, config);
   ctx.shelf = new ShelfService(db);
+  ctx.groups = new GroupService(db);
   ctx.sync = new SyncService(db, ctx.shelf);
   ctx.tts = new TtsService(config,ctx.settings!.read('tts'));
   ctx.browse = new BrowseService(db, config, ctx.shelf);

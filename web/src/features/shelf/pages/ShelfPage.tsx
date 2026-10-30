@@ -5,11 +5,12 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { BookOpen, LibraryBig, Search } from 'lucide-react';
 import { Sheet } from '../../../ui/sheet.tsx';
-import type { Book, ContinueReadingItem, ReadingState } from '../../../api/types.ts';
+import type { Book, ContinueReadingItem, GroupMode, ReadingState } from '../../../api/types.ts';
 import { useRuntime } from '../../../app/providers/runtime-context.tsx';
 import { useSettingsStore } from '../../../shared/stores/settings.store.ts';
-import { useShelf, useShelfGroups, type ShelfFilters } from '../queries/shelf.queries.ts';
+import { useShelf, useBookGroups, type ShelfFilters } from '../queries/shelf.queries.ts';
 import { foldSeries } from '../series.ts';
+import { BookDetailSheet, type BookMetadataDraft } from '../components/BookDetailSheet.tsx';
 import { SHELF_SORTS, ShelfSettingsSheet } from '../../../ui/shelf-settings.tsx';
 import { IconButton, Callout } from '../../../ui/toolkit.tsx';
 import { OpdsAccess } from '../../../ui/opds-access.tsx';
@@ -97,7 +98,7 @@ export function BookCard({ book, showAuthor, showProgress, onRemove, selecting, 
 const readingLabels: Record<ReadingState, string> = { reading: '在读', want: '想读', finished: '已读' };
 const readingStates = ['reading', 'want', 'finished'] as const;
 const isReadingState = (value: string | null): value is ReadingState => readingStates.includes(value as ReadingState);
-type BookAction = ReadingState | 'clear' | 'remove' | 'editSeries' | 'clearSeries';
+type BookAction = ReadingState | 'clear' | 'remove' | 'editSeries' | 'clearSeries' | 'detail' | 'seriesDetail';
 
 /** A stack of same-series books collapsed into one shelf slot. */
 function SeriesCover({ url, fallback }: { url: string | null; fallback: string }) {
@@ -177,12 +178,22 @@ export function ShelfPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [groupsOpen, setGroupsOpen] = useState(false);
   const [actionError, setActionError] = useState('');
-  // 在读 / 想读 / 已读 and one 分组 (a series or a tag), all in the URL like the page and sort.
+  /** The book whose 书籍详情 sheet is open, plus that sheet's own write state. */
+  const [detailTarget, setDetailTarget] = useState<Book | null>(null);
+  const [detailBusy, setDetailBusy] = useState(false);
+  const [detailError, setDetailError] = useState('');
+  /** A whole 丛书 stack being filed into groups (same groups for every volume). */
+  const [seriesTarget, setSeriesTarget] = useState<Book[] | null>(null);
+  const [seriesTargetIds, setSeriesTargetIds] = useState<string[]>([]);
+  const [seriesTargetBusy, setSeriesTargetBusy] = useState(false);
+  const [seriesTargetError, setSeriesTargetError] = useState('');
+  // 在读 / 想读 / 已读 and the reader's own groups (或 / 与 / 非), all in the URL like the page and sort.
   const status = isReadingState(params.get('status')) ? params.get('status') as ReadingState : undefined;
-  const series = params.get('series') || undefined, tag = series ? undefined : params.get('tag') || undefined;
-  const filters: ShelfFilters = { ...(status ? { status } : {}), ...(series ? { series } : {}), ...(tag ? { tag } : {}) };
-  const filtered = !!(status || series || tag);
-  const groups = useShelfGroups(groupsOpen);
+  const groupIds = (params.get('groups') ?? '').split(',').map(value => value.trim()).filter(Boolean);
+  const groupMode: GroupMode = params.get('groupMode') === 'and' ? 'and' : params.get('groupMode') === 'not' ? 'not' : 'or';
+  const filters: ShelfFilters = { ...(status ? { status } : {}), ...(groupIds.length > 0 ? { groups: groupIds, groupMode } : {}) };
+  const filtered = !!(status || groupIds.length > 0);
+  const groups = useBookGroups();
   const query = useShelf(page, sort, queryText, filters);
   const pages = query.data ? Math.max(1, Math.ceil(query.data.total / query.data.pageSize)) : 1;
   const cards = useMemo(() => query.data?.items ?? [], [query.data]);
@@ -190,15 +201,23 @@ export function ShelfPage() {
   const folded = useMemo(() => foldSeries(cards), [cards]);
   useEffect(() => { void runtime.updateSettings({ shelfSort: sort }); }, [runtime, sort]);
   // Every navigation keeps what it does not change; a new filter or query starts at page 1.
-  const go = (next: { q?: string; sort?: typeof sort; page?: number; status?: ReadingState | null; series?: string | null; tag?: string | null }) => {
+  const go = (next: { q?: string; sort?: typeof sort; page?: number; status?: ReadingState | null; groups?: string[] | null; groupMode?: GroupMode }) => {
     const q = next.q ?? queryText, nextStatus = next.status === undefined ? status : next.status ?? undefined;
-    const nextSeries = next.series === undefined ? series : next.series ?? undefined, nextTag = next.tag === undefined ? tag : next.tag ?? undefined;
-    setParams({ ...(q ? { q } : {}), sort: next.sort ?? sort, page: String(next.page ?? 1), ...(nextStatus ? { status: nextStatus } : {}), ...(nextSeries ? { series: nextSeries } : nextTag ? { tag: nextTag } : {}) });
+    const nextGroups = next.groups === undefined ? groupIds : next.groups ?? [];
+    const nextMode = next.groupMode ?? groupMode;
+    setParams({
+      ...(q ? { q } : {}), sort: next.sort ?? sort, page: String(next.page ?? 1),
+      ...(nextStatus ? { status: nextStatus } : {}),
+      // One group in 或 is the plain case; anything else has to say how it combines.
+      ...(nextGroups.length > 0
+        ? { groups: nextGroups.join(','), ...(nextGroups.length > 1 || nextMode !== 'or' ? { groupMode: nextMode } : {}) }
+        : {}),
+    });
   };
   const onSort = (value: string) => { const next = value as typeof sort; setSort(next); go({ sort: next }); };
   const onSearch = (event: FormEvent) => { event.preventDefault(); setQueryText(search.trim()); go({ q: search.trim() }); };
   const clearSearch = () => { setSearch(''); setQueryText(''); go({ q: '' }); };
-  const clearFilters = () => go({ status: null, series: null, tag: null });
+  const clearFilters = () => go({ status: null, groups: null });
   // On a phone the status chips are also a swipe apart: 全部 · 在读 · 想读 · 已读.
   const swipe = useSwipeTabs<HTMLDivElement>(direction => {
     const order = [null, ...readingStates] as const;
@@ -208,17 +227,17 @@ export function ShelfPage() {
     return true;
   });
   /**
-   * Refreshes everything a 丛书 edit can change.
+   * Refreshes everything an edit can change.
    *
-   * `['shelf']` alone is not enough: the 分组 dropdown reads `['shelf-groups']`
-   * and the home rail reads `['home']`, and neither key starts with `shelf`, so
-   * the prefix match skips them — the rows would update while the facet list and
-   * the "continue reading" strip kept the old 丛书.
+   * `['shelf']` alone is not enough: the 分组 picker reads `['book-groups']` and the
+   * home rail reads `['home']`, and neither key starts with `shelf`, so the prefix
+   * match skips them — the rows would update while the group list and the "continue
+   * reading" strip kept the old values.
    */
   const refreshShelf = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['shelf'] }),
-      queryClient.invalidateQueries({ queryKey: ['shelf-groups'] }),
+      queryClient.invalidateQueries({ queryKey: ['book-groups'] }),
       queryClient.invalidateQueries({ queryKey: ['home'] }),
     ]);
   };
@@ -226,6 +245,22 @@ export function ShelfPage() {
   const act = async (books: Book[], action: BookAction) => {
     const book = books[0];
     if (action === 'remove') { setRemoveTarget(book); return; }
+    if (action === 'detail') {
+      // 书籍详情 / 编辑: the shelf's own view of this book (书名 / 作者 / 分组 / 丛书).
+      setDetailTarget(book);
+      setDetailError('');
+      return;
+    }
+    if (action === 'seriesDetail') {
+      // A 丛书 stack is filed as one set: every volume gets the same groups.
+      setSeriesTarget(books);
+      // Start from the groups all volumes already share, so re-saving is a no-op.
+      const shared = (book.groups ?? []).map(group => group.id)
+        .filter(id => books.every(item => (item.groups ?? []).some(group => group.id === id)));
+      setSeriesTargetIds(shared);
+      setSeriesTargetError('');
+      return;
+    }
     if (action === 'editSeries') {
       setEditTarget(books);
       setEditSeries(book.series ?? '');
@@ -263,10 +298,12 @@ export function ShelfPage() {
     // A 丛书 is edited and cleared as a set: the card represents all of them.
     if (books.length > 1) return [
       { value: 'editSeries', label: `编辑整组丛书（${books.length} 册）` },
+      { value: 'seriesDetail', label: `丛书详情（${books.length} 册）` },
       { value: 'clearSeries', label: '取消丛书（整组）' },
     ];
     const book = books[0];
     return [
+      { value: 'detail', label: '书籍详情' },
       ...readingStates.filter(state => state !== book.readingState).map(state => ({ value: state, label: '标记为' + readingLabels[state] })),
       ...(book.readingState ? [{ value: 'clear', label: '清除标记' }] : []),
       { value: 'editSeries', label: '编辑丛书 / 编号' },
@@ -329,11 +366,16 @@ export function ShelfPage() {
       await refreshShelf();
     } catch (error) { setActionError(error instanceof Error ? error.message : '保存失败，请稍后重试。'); }
   };
-  const groupOptions = [
-    { value: '', label: '全部书籍' },
-    ...(groups.data?.series ?? []).map(value => ({ value: 'series:' + value, label: '系列 · ' + value })),
-    ...(groups.data?.tags ?? []).map(value => ({ value: 'tag:' + value, label: '标签 · ' + value })),
-  ];
+  // ---- 分组筛选（可多选，或 / 与 / 非）----
+  const [draftGroupIds, setDraftGroupIds] = useState<string[]>([]);
+  const [draftGroupMode, setDraftGroupMode] = useState<GroupMode>('or');
+  const groupModeLabel = groupMode === 'and' ? '与' : groupMode === 'not' ? '非' : '或';
+  const openGroupFilter = () => {
+    setDraftGroupIds(groupIds);
+    setDraftGroupMode(groupMode);
+    setGroupsOpen(true);
+  };
+  const groupName = (id: string) => groups.data?.find(group => group.id === id)?.name ?? '已删除的分组';
   // Batch-tag entry: toggle a card's books in/out of the selection, then open the 丛书 editor.
   const toggleSelect = (entry: Book | { series: Book[] }) => {
     const ids = 'id' in entry ? [entry.id] : entry.series.map(b => b.id);
@@ -354,7 +396,55 @@ export function ShelfPage() {
     setEditSeries('');
     setEditIndex('1');
   };
-  const groupLabel = series ? '系列 · ' + series : tag ? '标签 · ' + tag : '';
+  /** Saves the 书籍详情 sheet: metadata overrides first, then this book's groups. */
+  const saveBookDetail = async (draft: BookMetadataDraft, nextGroupIds: string[]) => {
+    const book = detailTarget;
+    if (!book) return;
+    setDetailBusy(true);
+    setDetailError('');
+    try {
+      const patch: Record<string, unknown> = {};
+      if (draft.title !== (book.title ?? '')) patch.title = draft.title;
+      if (draft.author !== (book.author ?? '')) patch.author = draft.author;
+      if (draft.description !== (book.description ?? '')) patch.description = draft.description;
+      if (draft.series !== (book.series ?? '')) patch.series = draft.series;
+      if ((draft.seriesIndex ?? null) !== (book.seriesIndex ?? null)) patch.seriesIndex = draft.seriesIndex;
+      if (Object.keys(patch).length > 0) await runtime.api.patchBookMetadata(book.id, patch);
+      await runtime.api.setBookGroups(book.id, nextGroupIds);
+      setDetailTarget(null);
+      await refreshShelf();
+    } catch (error) {
+      setDetailError(error instanceof Error ? error.message : '保存失败，请稍后重试。');
+    } finally { setDetailBusy(false); }
+  };
+  /** Undo one manual field; the sheet stays open on the restored value. */
+  const clearBookField = async (field: 'title' | 'author' | 'description' | 'series') => {
+    const book = detailTarget;
+    if (!book) return;
+    setDetailBusy(true);
+    setDetailError('');
+    try {
+      const updated = await runtime.api.clearBookMetadataField(book.id, field);
+      setDetailTarget(updated);
+      await refreshShelf();
+    } catch (error) {
+      setDetailError(error instanceof Error ? error.message : '撤销失败，请稍后重试。');
+    } finally { setDetailBusy(false); }
+  };
+  /** Files every volume of a 丛书 into the same groups (one write per book). */
+  const saveSeriesDetail = async () => {
+    const books = seriesTarget;
+    if (!books) return;
+    setSeriesTargetBusy(true);
+    setSeriesTargetError('');
+    try {
+      for (const book of books) await runtime.api.setBookGroups(book.id, seriesTargetIds);
+      setSeriesTarget(null);
+      await refreshShelf();
+    } catch (error) {
+      setSeriesTargetError(error instanceof Error ? error.message : '保存失败，请稍后重试。');
+    } finally { setSeriesTargetBusy(false); }
+  };
   const remove = async (book: Book | ContinueReadingItem) => { await runtime.api.browseBatchShelf({ bookIds: [book.id] }, 'remove'); await refreshShelf(); };
   const subtitle = queryText ? (query.data?.total ? `「${queryText}」匹配 ${query.data.total} 本` : `没有匹配「${queryText}」的书`) : '收藏好书，随时接着读'; // count and sort live in the sticky toolbar below; saying them twice is noise
   const densityLabel = settings.shelfDensity === 'compact' ? '紧凑' : settings.shelfDensity === 'comfortable' ? '宽松' : '适中';
@@ -382,9 +472,12 @@ export function ShelfPage() {
           <button type="button" className="chip" aria-pressed={!status} onClick={() => go({ status: null })}>全部</button>
           {readingStates.map(state => <button key={state} type="button" className="chip" aria-pressed={status === state} onClick={() => go({ status: state })}>{readingLabels[state]}</button>)}
         </div>
-        {groupLabel
-          ? <button type="button" className="chip shelf-group-active" aria-pressed="true" aria-label={`${groupLabel}，点按取消分组`} onClick={() => go({ series: null, tag: null })}>{groupLabel}<span aria-hidden="true"> ×</span></button>
-          : <button type="button" className="chip shelf-group" aria-haspopup="dialog" onClick={() => setGroupsOpen(true)}>分组</button>}
+        <button type="button" className={groupIds.length > 0 ? 'chip shelf-group-active' : 'chip shelf-group'}
+          aria-pressed={groupIds.length > 0} aria-haspopup="dialog"
+          aria-label={groupIds.length > 0 ? `分组：${groupIds.map(groupName).join('、')}（${groupModeLabel}），点按修改` : '分组筛选'}
+          onClick={openGroupFilter}>
+          分组{groupIds.length > 0 ? ` · ${groupIds.length} · ${groupModeLabel}` : ''}
+        </button>
       </div>
       <FloatingNotice message={actionError} error />
       {(!query.isPending && (cards.length > 0 || queryText || filtered)) && <div className="shelf-toolbar"><span className="shelf-count muted">{queryText ? `找到 ${query.data?.total ?? 0} 本` : `共 ${query.data?.total ?? 0} 本`}</span><div className="shelf-sort" role="group" aria-label="排序方式">{SHELF_SORTS.map(option => <button key={option.value} type="button" className="chip" aria-pressed={option.value === sort} onClick={() => onSort(option.value)}>{option.label}</button>)}</div><button type="button" className="chip" aria-pressed={selectMode} onClick={() => { setSelectMode(v => !v); if (selectMode) setSelected(new Set()); }}>{selectMode ? '取消选择' : '批量标记'}</button></div>}
@@ -399,13 +492,94 @@ export function ShelfPage() {
     {settingsOpen && <ShelfSettingsSheet settings={settings} onPatch={patch => { void runtime.updateSettings(patch); }} onClose={() => setSettingsOpen(false)} onOpenExternalReader={() => { setSettingsOpen(false); setOpdsOpen(true); }} />}
     {opdsOpen && <OpdsAccess api={runtime.api} onSignedOut={() => { void runtime.api.signOut(); }} onClose={() => { setOpdsOpen(false); setSettingsOpen(true); }} />}
     {menuTarget && <DialogView dialog={{ kind: 'pick', title: menuTarget.length > 1 ? `${menuTarget[0].series || '丛书'}（${menuTarget.length} 册）` : `《${menuTarget[0].title || '未命名'}》`, options: menuOptions(menuTarget), resolve: (_value: string | null) => undefined } satisfies Dialog} destructive={menuTarget.length > 1 ? '' : '从书架拿掉'} onClose={answer => { const target = menuTarget; setMenuTarget(null); if (typeof answer === 'string' && answer) void act(target, answer as BookAction); }} />}
-    {groupsOpen && <DialogView dialog={{ kind: 'pick', title: groups.isPending ? '分组 · 正在读取…' : groups.error ? '分组 · 读取失败' : '分组', options: groupOptions, resolve: (_value: string | null) => undefined } satisfies Dialog} destructive="" onClose={answer => {
-      setGroupsOpen(false);
-      if (typeof answer !== 'string') return;
-      if (answer === '') go({ series: null, tag: null });
-      else if (answer.startsWith('series:')) go({ series: answer.slice(7), tag: null });
-      else if (answer.startsWith('tag:')) go({ tag: answer.slice(4), series: null });
-    }} />}
+    {groupsOpen && <Sheet title="分组筛选" subtitle={`${groups.data?.length ?? 0} 个分组`} onClose={() => setGroupsOpen(false)}
+      footer={<>
+        <button type="button" className="button" onClick={() => { setGroupsOpen(false); go({ groups: null }); }}>清除分组</button>
+        <Link className="button" to="/shelf/groups">管理分组</Link>
+        <button type="button" className="button primary" onClick={() => { setGroupsOpen(false); go({ groups: draftGroupIds, groupMode: draftGroupMode }); }}>应用</button>
+      </>}>
+      <div className="sheet-form">
+        {groups.isPending && <p className="sheet-text muted">正在读取分组…</p>}
+        {groups.error && <Callout tone="error">分组读取失败：{groups.error.message}</Callout>}
+        {!groups.isPending && !groups.error && (groups.data?.length ?? 0) === 0 && <div className="sheet-text">
+          <p>还没有分组。分组是你自己的书架结构，和文件里的系列、标签无关。</p>
+          <Link className="button" to="/shelf/groups">去创建分组</Link>
+        </div>}
+        {(groups.data?.length ?? 0) > 0 && <>
+          <div className="sheet-field">
+            <label>选择分组<span className="muted">（可多选）</span></label>
+            <div className="shelf-status" role="group" aria-label="选择分组">
+              {groups.data!.map(group => <button key={group.id} type="button" className="chip"
+                aria-pressed={draftGroupIds.includes(group.id)}
+                aria-label={`${group.name}，${group.bookCount} 本`}
+                onClick={() => setDraftGroupIds(current => (current.includes(group.id)
+                  ? current.filter(id => id !== group.id)
+                  : [...current, group.id]))}>
+                {group.name}<span className="muted"> {group.bookCount}</span>
+              </button>)}
+            </div>
+          </div>
+          <div className="sheet-field">
+            <label>多选时怎么组合</label>
+            <div className="shelf-status" role="group" aria-label="组合方式">
+              {([['or', '或'], ['and', '与'], ['not', '非']] as const).map(([value, label]) => <button key={value} type="button" className="chip"
+                aria-pressed={draftGroupMode === value} disabled={draftGroupIds.length < 2 && value !== 'or'}
+                onClick={() => setDraftGroupMode(value)}>{label}</button>)}
+            </div>
+            <p className="sheet-text muted">或：属于任一所选分组 · 与：同时属于全部所选分组 · 非：不属于任何一个所选分组</p>
+          </div>
+        </>}
+      </div>
+    </Sheet>}
+    {detailTarget && <BookDetailSheet
+      key={`${detailTarget.id}:${detailTarget.updatedAt}`}
+      book={detailTarget}
+      groups={groups.data ?? []}
+      busy={detailBusy}
+      error={detailError}
+      onSave={(draft, nextGroupIds) => void saveBookDetail(draft, nextGroupIds)}
+      onClearField={field => void clearBookField(field)}
+      onClose={() => { if (!detailBusy) setDetailTarget(null); }}
+    />}
+    {seriesTarget && <Sheet
+      title={`丛书详情 · ${seriesTarget[0].series || '未命名'}`}
+      subtitle={`${seriesTarget.length} 册`}
+      busy={seriesTargetBusy}
+      onClose={() => { if (!seriesTargetBusy) setSeriesTarget(null); }}
+      footer={<>
+        <button type="button" className="button" disabled={seriesTargetBusy} onClick={() => setSeriesTarget(null)}>取消</button>
+        <button type="button" className="button primary" disabled={seriesTargetBusy} onClick={() => void saveSeriesDetail()}>保存分组</button>
+      </>}>
+      <div className="sheet-form">
+        {seriesTargetError && <Callout tone="error">{seriesTargetError}</Callout>}
+        <div className="sheet-field">
+          <label>分组<span className="muted">（整组统一设置，可多选）</span></label>
+          {(groups.data?.length ?? 0) === 0
+            ? <p className="sheet-text muted">还没有分组。</p>
+            : <div className="shelf-status" role="group" aria-label="选择分组">
+              {groups.data!.map(group => <button key={group.id} type="button" className="chip"
+                aria-pressed={seriesTargetIds.includes(group.id)}
+                aria-label={`${group.name}，${group.bookCount} 本`}
+                disabled={seriesTargetBusy}
+                onClick={() => setSeriesTargetIds(current => (current.includes(group.id)
+                  ? current.filter(id => id !== group.id)
+                  : [...current, group.id]))}>
+                {group.name}
+              </button>)}
+            </div>}
+          <p className="sheet-text muted">保存后这 {seriesTarget.length} 册都会设成所选分组；原来各自的分组会被覆盖。</p>
+        </div>
+        <div className="sheet-field">
+          <label>包含的册</label>
+          <ul className="series-order">
+            {[...seriesTarget].sort((a, b) => (a.seriesIndex ?? 0) - (b.seriesIndex ?? 0)).map(book => <li key={book.id} className="series-order-item">
+              <span className="series-order-num">{book.seriesIndex ?? '·'}</span>
+              <Link className="series-order-title" to={`/book/${encodeURIComponent(book.id)}`}>{book.title || '未命名'}</Link>
+            </li>)}
+          </ul>
+        </div>
+      </div>
+    </Sheet>}
     {removeTarget && <DialogView dialog={{ kind: 'confirm', title: '移出书架', body: `确定要将《${removeTarget.title}》移出书架吗？`, resolve: (_answer: boolean) => undefined } satisfies Dialog} destructive="移出书架" onClose={answer => { const target = removeTarget; setRemoveTarget(null); if (answer === true) void remove(target); }} />}
     {editTarget && editMode === 'manage' && <Sheet title={`管理丛书 · ${editTarget[0].series || '未命名'}`} onClose={() => setEditTarget(null)} footer={<><button type="button" className="button" onClick={() => setEditTarget(null)}>取消</button><button type="button" className="button primary" onClick={() => void saveManagedSeries()}>保存</button></>}>
       <div className="sheet-form">
