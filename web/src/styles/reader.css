@@ -4206,6 +4206,17 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
 }
 .shelf-filters::-webkit-scrollbar { display: none; }
 .shelf-status { display: flex; gap: var(--space-1); }
+/*
+ * A row of chips that wraps inside its parent.
+ *
+ * `.shelf-status` is a single non-wrapping line (the reading-state chips ride a
+ * horizontally scrolling strip), so reusing it inside a sheet made the panel as wide
+ * as the longest group name and the whole sheet scrolled sideways. A group name is
+ * reader-authored and can be long, so this row wraps and the chips themselves may
+ * break words rather than overflow.
+ */
+.chip-row { display: flex; flex-wrap: wrap; gap: var(--space-1); min-width: 0; }
+.chip-row .chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: start; }
 .shelf-filters .chip[aria-pressed='true'] { background: var(--color-brand-soft); border-color: transparent; color: var(--reader-accent); font-weight: 600; }
 .shelf-filters .shelf-group, .shelf-filters .shelf-group-active { margin-inline-start: auto; flex: none; white-space: nowrap; }
 .book-card .book-state {

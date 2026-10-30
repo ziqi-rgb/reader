@@ -99,7 +99,7 @@ export function BookDetailSheet({ book, groups, busy, error, onSave, onClearFiel
         <label>分组<span className="muted">（可多选；和文件里的系列、标签无关）</span></label>
         {groups.length === 0
           ? <p className="sheet-text muted">还没有分组。</p>
-          : <div className="shelf-status" role="group" aria-label="选择分组">
+          : <div className="chip-row" role="group" aria-label="选择分组">
             {groups.map(group => <button key={group.id} type="button" className="chip" aria-pressed={selected.includes(group.id)}
               aria-label={`${group.name}，${group.bookCount} 本`}
               disabled={busy} onClick={() => toggle(group.id)}>{group.name}</button>)}

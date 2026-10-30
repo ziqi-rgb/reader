@@ -508,7 +508,7 @@ export function ShelfPage() {
         {(groups.data?.length ?? 0) > 0 && <>
           <div className="sheet-field">
             <label>选择分组<span className="muted">（可多选）</span></label>
-            <div className="shelf-status" role="group" aria-label="选择分组">
+            <div className="chip-row" role="group" aria-label="选择分组">
               {groups.data!.map(group => <button key={group.id} type="button" className="chip"
                 aria-pressed={draftGroupIds.includes(group.id)}
                 aria-label={`${group.name}，${group.bookCount} 本`}
@@ -521,7 +521,7 @@ export function ShelfPage() {
           </div>
           <div className="sheet-field">
             <label>多选时怎么组合</label>
-            <div className="shelf-status" role="group" aria-label="组合方式">
+            <div className="chip-row" role="group" aria-label="组合方式">
               {([['or', '或'], ['and', '与'], ['not', '非']] as const).map(([value, label]) => <button key={value} type="button" className="chip"
                 aria-pressed={draftGroupMode === value} disabled={draftGroupIds.length < 2 && value !== 'or'}
                 onClick={() => setDraftGroupMode(value)}>{label}</button>)}
@@ -556,7 +556,7 @@ export function ShelfPage() {
           <label>分组<span className="muted">（整组统一设置，可多选）</span></label>
           {(groups.data?.length ?? 0) === 0
             ? <p className="sheet-text muted">还没有分组。</p>
-            : <div className="shelf-status" role="group" aria-label="选择分组">
+            : <div className="chip-row" role="group" aria-label="选择分组">
               {groups.data!.map(group => <button key={group.id} type="button" className="chip"
                 aria-pressed={seriesTargetIds.includes(group.id)}
                 aria-label={`${group.name}，${group.bookCount} 本`}
