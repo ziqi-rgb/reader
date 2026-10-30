@@ -123,6 +123,25 @@ export class ChapterPublications {
     });
   }
 
+  /**
+   * Refresh the directory from the source.
+   *
+   * **Only additions are accepted.** A directory that has lost a chapter is not
+   * applied at all: the fetched snapshot is dropped, the previous one stays
+   * published untouched, and the caller is told the source's list is broken —
+   * exactly what happens when the source cannot be reached.
+   *
+   * The reason is that a chapter missing from a fetched list is indistinguishable
+   * from a scraper that stopped halfway, a page that answered with a truncated
+   * directory, or a site that is mid-rebuild. Accepting it would silently take
+   * away a reader's chapter: their place in it, the cached copy keyed to it, and
+   * every note anchored in it. Keeping what was already published and retrying
+   * later is recoverable; accepting the loss is not.
+   *
+   * A deliberate replacement still works: `switchSource` and `acquire` are the
+   * reader asking for a *different* directory, which is a different statement
+   * from a refresh claiming the current one shrank.
+   */
   refresh(userId: string, bookId: string, signal?: AbortSignal): Promise<Manifest> {
     this.owned(userId, bookId);
     return this.serial(`publication:${bookId}`, async () => {
@@ -130,6 +149,15 @@ export class ChapterPublications {
       const publication = this.owned(userId, bookId);
       const snapshot = this.normalize(await this.loader.manifest(userId, publication.source_id, publication.publication_ref, signal), publication.publication_ref);
       signal?.throwIfAborted();
+      const published = this.manifest(userId, bookId);
+      const incoming = new Set(snapshot.items.map((item) => `chapter:${hash(item.id)}`));
+      const missing = published.items.filter((item) => !incoming.has(item.href));
+      if (missing.length > 0) {
+        throw conflict(
+          `上游章节出现异常（章节减少 ${missing.length} 章），已保留原目录`,
+          'CHAPTER_LIST_SHRUNK',
+        );
+      }
       const snapshotJson = JSON.stringify(snapshot);
       const revision = hash(snapshotJson);
       if (revision !== publication.revision) {

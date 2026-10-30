@@ -1034,7 +1034,12 @@ export class ReaderScreen {
     } catch (error) {
       if (token !== this.loadingToken) return;
       if (error instanceof ApiError && error.isAuthFailure) this.options.onSignedOut();
-      else this.flashStatus('刷新目录失败，已保留当前章节', 3200);
+      else if (error instanceof ApiError && error.code === 'CHAPTER_LIST_SHRUNK') {
+        // The server refused the directory because the source lost chapters. It
+        // knows how many and why; say that instead of a generic failure, so the
+        // reader understands the chapter is not gone from their shelf.
+        this.flashStatus(error.message, 6000);
+      } else this.flashStatus('刷新目录失败，已保留当前章节', 3200);
     } finally {
       if (token === this.loadingToken) this.patch({ refreshing: false });
     }

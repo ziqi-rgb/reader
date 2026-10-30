@@ -135,6 +135,59 @@ test('switching keeps book identity, old cache and subscriptions; failures never
   } finally { f.db.close(); await rm(f.root, { recursive: true, force: true }); }
 });
 
+test('a refresh that loses a chapter is refused, so the published directory never shrinks', async () => {
+  const f = await fixture();
+  try {
+    const id = await f.chapters.acquire(f.provider, f.context, { entryRef: 'book' }, 'book', { ref: 'book', title: '远程书' });
+    const published = f.chapters.manifest('u1', id);
+    const pageCount = f.db.get<{ page_count: number }>('SELECT page_count FROM books WHERE id = ?', id)!.page_count;
+
+    // The source dropped its second chapter: a fewer-chapters directory is treated
+    // exactly like an unreachable one — nothing is applied, and the caller is told.
+    f.setItems([{ id: 'one', seq: 0, title: '第一章', kind: 'chapter', mediaType: 'text/plain', ref: 'provider-one' }]);
+    await assert.rejects(f.chapters.refresh('u1', id), { code: 'CHAPTER_LIST_SHRUNK' });
+    assert.deepEqual(f.chapters.manifest('u1', id), published);
+    assert.equal(f.db.get<{ page_count: number }>('SELECT page_count FROM books WHERE id = ?', id)!.page_count, pageCount);
+
+    // The whole book is gone upstream: an empty directory is the same statement.
+    f.setItems([]);
+    await assert.rejects(f.chapters.refresh('u1', id), { code: 'CHAPTER_LIST_SHRUNK' });
+    assert.deepEqual(f.chapters.manifest('u1', id), published);
+
+    // Additions are still applied: the rule is "only grows", not "never changes".
+    f.setItems([
+      { id: 'one', seq: 0, title: '第一章', kind: 'chapter', mediaType: 'text/plain', ref: 'provider-one' },
+      { id: 'two', seq: 1, title: '第二章', kind: 'chapter', mediaType: 'text/plain', ref: 'provider-two' },
+      { id: 'three', seq: 2, title: '第三章', kind: 'chapter', mediaType: 'text/plain', ref: 'provider-three' },
+    ]);
+    assert.equal((await f.chapters.refresh('u1', id)).total, 3);
+  } finally { f.db.close(); await rm(f.root, { recursive: true, force: true }); }
+});
+
+test('a subscription check that sees fewer chapters fails the way an unreachable source does', async () => {
+  const f = await fixture();
+  let now = 1000;
+  try {
+    const id = await f.chapters.acquire(f.provider, f.context, { entryRef: 'book' }, 'book', { ref: 'book', title: '远程书' });
+    const updates = new ChapterUpdates(f.db, f.chapters, () => now);
+    updates.configure('u1', id, { enabled: true, intervalMinutes: 15 });
+    const published = f.chapters.manifest('u1', id);
+
+    f.setItems([{ id: 'one', seq: 0, title: '第一章', kind: 'chapter', mediaType: 'text/plain', ref: 'provider-one' }]);
+    await updates.runDue();
+
+    const row = updates.list('u1')[0]!;
+    // Same handling as a failed fetch: the error is recorded, the check backs off,
+    // and neither the success time nor the new-chapter count moves.
+    assert.equal(row.lastError, 'CHAPTER_LIST_SHRUNK');
+    assert.equal(row.lastSuccessAt, null);
+    assert.equal(row.newChapters, 0);
+    assert.ok(row.nextCheckAt > now);
+    assert.deepEqual(f.chapters.manifest('u1', id), published);
+    await updates.stop();
+  } finally { f.db.close(); await rm(f.root, { recursive: true, force: true }); }
+});
+
 test('a prefetch fetches each chapter once and leaves a text file per chapter for the reader', async () => {
   const f = await fixture();
   try {
@@ -183,7 +236,12 @@ test('durable subscriptions update once, accumulate new chapters, retry failures
     assert.throws(() => updates.configure('other', id, { enabled: true }), { code: 'BOOK_NOT_FOUND' });
     assert.throws(() => updates.configure('u1', id, { intervalMinutes: 1 }), { code: 'BAD_REQUEST' });
     updates.configure('u1', id, { enabled: true, intervalMinutes: 15 });
-    f.setItems([{ id: 'three', seq: 0, title: '新章', kind: 'chapter', mediaType: 'text/plain', ref: 'new' }]);
+    // Only an addition is a valid refresh; the two published chapters stay.
+    f.setItems([
+      { id: 'one', seq: 0, title: '第一章', kind: 'chapter', mediaType: 'text/plain', ref: 'provider-one' },
+      { id: 'two', seq: 1, title: '第二章', kind: 'chapter', mediaType: 'text/plain', ref: 'provider-two' },
+      { id: 'three', seq: 2, title: '新章', kind: 'chapter', mediaType: 'text/plain', ref: 'new' },
+    ]);
     await Promise.all([updates.runDue(), updates.runDue()]);
     assert.equal(updates.list('u1')[0]!.newChapters, 1);
     assert.equal(updates.list('u1')[0]!.lastSuccessAt, now);
@@ -313,7 +371,10 @@ test('a refresh racing with an uncached resource never labels new bytes with an 
     const pending = f.chapters.asset('u1', bookId, oldManifest.items[0]!.resourceRef!);
     const outcome = assert.rejects(pending, { code: 'CHAPTER_SNAPSHOT_EXPIRED' });
     await started;
-    f.setItems([{ id: 'one', seq: 0, title: '第一章更新', kind: 'chapter', mediaType: 'text/plain', ref: 'provider-one' }]);
+    f.setItems([
+      { id: 'one', seq: 0, title: '第一章更新', kind: 'chapter', mediaType: 'text/plain', ref: 'provider-one' },
+      { id: 'two', seq: 1, title: '第二章', kind: 'chapter', mediaType: 'text/plain', ref: 'provider-two' },
+    ]);
     await f.chapters.refresh('u1', bookId);
     finish({ mediaType: 'text/plain', text: '这是更新后内容' });
     await outcome;
@@ -376,7 +437,11 @@ test('forced chapter refresh replaces cache atomically and preserves old text on
     await assert.rejects(f.chapters.asset('u1', id, ref, undefined, true), /offline/);
     assert.deepEqual((await f.chapters.asset('u1', id, ref)).data, refreshed.data);
     assert.throws(() => f.chapters.asset('other', id, ref, undefined, true), { code: 'BOOK_NOT_FOUND' });
-    f.setItems([{ id: 'new', seq: 0, title: '新', kind: 'chapter', mediaType: 'text/plain', ref: 'new' }]);
+    f.setItems([
+      { id: 'one', seq: 0, title: '第一章', kind: 'chapter', mediaType: 'text/plain', ref: 'provider-one' },
+      { id: 'two', seq: 1, title: '第二章', kind: 'chapter', mediaType: 'text/plain', ref: 'provider-two' },
+      { id: 'new', seq: 2, title: '新', kind: 'chapter', mediaType: 'text/plain', ref: 'new' },
+    ]);
     await f.chapters.refresh('u1', id);
     await assert.rejects(f.chapters.asset('u1', id, ref, undefined, true), { code: 'CHAPTER_SNAPSHOT_EXPIRED' });
   } finally { f.db.close(); await rm(f.root, { recursive: true, force: true }); }
