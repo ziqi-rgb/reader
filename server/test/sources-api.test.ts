@@ -621,6 +621,27 @@ test('stream errors retain earlier events and caps prevent extra provider calls'
   assert.equal(result[0]!.data.limitReached, true); assert.equal(result.at(-1)!.data.reason, 'limit');
 });
 
+test('a provider-declared limit ends the stream but keeps its cursor for a later resume', async t => {
+  const h = await harness(); t.after(() => h.close()); let calls = 0;
+  const provider: SourceProvider = {
+    descriptor: { id: 'limit-cursor', label: 'Limit', version: '1', capabilities: ['search', 'detail'] },
+    async detail(_ctx, ref) { return { ref, title: ref }; },
+    async acquire() { return { kind: 'action-required', action: { type: 'external', label: 'Test' } }; },
+    async search() {
+      calls++;
+      return { items: [{ ref: 'one', title: 'one' }], nextCursor: `page-${calls + 1}`, limitReached: true };
+    }
+  };
+  h.ctx.sources!.registry.register({ pluginId: 'reader.limit-cursor', provider });
+  await h.ctx.sources!.create({ id: 'limit-cursor', pluginId: 'reader.limit-cursor', sourceType: 'limit-cursor', name: 'limit', config: {} });
+  const response = await h.app.inject({ method: 'POST', url: '/api/v1/sources/limit-cursor/search', headers: auth(h.admin), payload: searchPayload });
+  const events = streamEvents(response.body);
+  assert.equal(calls, 1, 'a declared limit stops this stream instead of paging on');
+  assert.equal(events[0]!.data.limitReached, true);
+  assert.equal(events[0]!.data.nextCursor, 'page-2', 'the cursor must reach the browser so "继续搜索" can resume');
+  assert.equal(events.at(-1)!.data.reason, 'limit');
+});
+
 test('resuming a disconnected stream waits for its previous cleanup before polling again', { timeout: 10000 }, async t => {
   const h = await harness(); t.after(() => h.close());
   let entered!: () => void, stopping!: () => void, release!: () => void;

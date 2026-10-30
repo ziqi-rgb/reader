@@ -54,7 +54,9 @@ export function searchResponse(request: FastifyRequest, reply: FastifyReply, hos
         yield frame('results', result);
         // Stream ordinary provider pagination as well; the browser receives one
         // continuous result stream regardless of whether the provider is batched.
-        cursor = !capped ? page.nextCursor : undefined;
+        // A provider-declared limit ends this stream but leaves its cursor in the
+        // result, so the browser's "继续搜索" resumes from there instead of starting over.
+        cursor = !capped && !page.limitReached ? page.nextCursor : undefined;
         if (!cursor) { complete = true; reason = capped || page.limitReached ? 'limit' : 'complete'; yield frame('done', { reason }); }
       } while (cursor && !controller.signal.aborted);
     } catch (error) {
