@@ -111,7 +111,7 @@ export class ProcessPlugin {
         }
         return this.request(method, {
           sourceType: type.id, context: { instance: ctx.instance, userId: ctx.userId, credentials }, ...args,
-        }, ctx.signal) as Promise<T>;
+        }, ctx.signal, ctx.timeoutMs) as Promise<T>;
       };
       const provider: SourceProvider = {
         descriptor: { ...type, version: this.manifest.version },
@@ -209,8 +209,12 @@ export class ProcessPlugin {
     return child;
   }
 
-  private request(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+  private request(method: string, params: Record<string, unknown>, signal?: AbortSignal, timeoutMs?: number): Promise<unknown> {
     const startedAt = Date.now();
+    // The caller's deadline wins over this client's default: a chapter cache run
+    // that the reader gave five minutes must not be cut off at this process's
+    // 30-second default.
+    const deadline = Math.max(1, timeoutMs ?? this.timeoutMs);
     const abortError = () => signal?.reason?.name === 'TimeoutError'
       ? new PluginError('PLUGIN_TIMEOUT', 'plugin request exceeded its execution deadline')
       : new PluginError('PLUGIN_CANCELLED', 'plugin request cancelled');
@@ -251,7 +255,7 @@ export class ProcessPlugin {
         // Deadlines belong to individual calls, not the shared plugin process.
         // Cooperation is best-effort; late responses are discarded by request ID.
         cancelRequest(new PluginError('PLUGIN_TIMEOUT', 'plugin request exceeded its execution deadline'));
-      }, this.timeoutMs);
+      }, deadline);
       timer.unref();
       const cleanup = () => {
         clearTimeout(timer);

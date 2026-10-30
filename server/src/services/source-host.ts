@@ -35,10 +35,10 @@ export class SourceHost {
     this.key = createHash('sha256').update('reader/source-credentials/v1\0').update(config.jwtSecret).digest();
     this.acquisitions = new FileAcquisitions(db, config);
     this.chapters = new ChapterPublications(db, {
-      manifest: (userId, sourceId, ref, signal) => this.manifest(userId, sourceId, ref, signal),
-      resource: (userId, sourceId, publicationRef, ref, signal) => this.call(userId, sourceId, (provider, ctx) => provider.readResource
+      manifest: (userId, sourceId, ref, signal, timeoutMs) => this.manifest(userId, sourceId, ref, signal, timeoutMs),
+      resource: (userId, sourceId, publicationRef, ref, signal, timeoutMs) => this.call(userId, sourceId, (provider, ctx) => provider.readResource
         ? provider.readResource(ctx, { publicationRef, ref })
-        : Promise.reject(badRequest('source has no chapter resources', 'SOURCE_UNSUPPORTED')), signal),
+        : Promise.reject(badRequest('source has no chapter resources', 'SOURCE_UNSUPPORTED')), signal, timeoutMs),
     }, config.dataDir);
     this.registry.registerBuiltin('reader.local', createLocalProvider(db, shelf));
     this.updates = new ChapterUpdates(db, this.chapters);
@@ -252,20 +252,20 @@ export class SourceHost {
    * upstream, and one text file per chapter in the reader's own directory, so
    * "download" has something to hand over that a person can also open.
    */
-  prefetchChapters(userId: string, bookId: string, from: number, to: number, signal?: AbortSignal) {
-    return this.chapters.prefetch(userId, bookId, from, to, this.chapterCache(), signal);
+  prefetchChapters(userId: string, bookId: string, from: number, to: number, signal?: AbortSignal, timeoutMs?: number) {
+    return this.chapters.prefetch(userId, bookId, from, to, this.chapterCache(), signal, timeoutMs);
   }
 
-  async manifest(userId: string, id: string, ref: string, signal?: AbortSignal) {
+  async manifest(userId: string, id: string, ref: string, signal?: AbortSignal, timeoutMs?: number) {
     return this.call(userId, id, (provider, ctx) => provider.getManifest
-      ? provider.getManifest(ctx, ref) : Promise.reject(badRequest('source has no chapter manifest', 'SOURCE_UNSUPPORTED')), signal);
+      ? provider.getManifest(ctx, ref) : Promise.reject(badRequest('source has no chapter manifest', 'SOURCE_UNSUPPORTED')), signal, timeoutMs);
   }
-  async resource(userId: string, id: string, publicationRef: string, ref: string, signal?: AbortSignal) {
+  async resource(userId: string, id: string, publicationRef: string, ref: string, signal?: AbortSignal, timeoutMs?: number) {
     return this.call(userId, id, (provider, ctx) => provider.readResource
-      ? provider.readResource(ctx, { publicationRef, ref }) : Promise.reject(badRequest('source has no chapter resources', 'SOURCE_UNSUPPORTED')), signal);
+      ? provider.readResource(ctx, { publicationRef, ref }) : Promise.reject(badRequest('source has no chapter resources', 'SOURCE_UNSUPPORTED')), signal, timeoutMs);
   }
 
-  private async call<T>(userId: string, id: string, action: (provider: SourceProvider, ctx: SourceContext) => Promise<T>, externalSignal?: AbortSignal): Promise<T> {
+  private async call<T>(userId: string, id: string, action: (provider: SourceProvider, ctx: SourceContext) => Promise<T>, externalSignal?: AbortSignal, timeoutMs = 60_000): Promise<T> {
     const row = this.instance(id);
     if (!row.enabled) throw badRequest('source is disabled', 'SOURCE_DISABLED');
     const registration = this.registry.get(row.plugin_id, row.source_type);
@@ -278,11 +278,11 @@ export class SourceHost {
     this.activeSources.set(id, active + 1);
     this.activeCalls += 1;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60_000); timer.unref();
+    const timer = setTimeout(() => controller.abort(), timeoutMs); timer.unref();
     const signal = externalSignal ? AbortSignal.any([externalSignal, controller.signal]) : controller.signal;
     try {
       signal.throwIfAborted();
-      const result = await action(registration.provider, this.context(row, userId, signal));
+      const result = await action(registration.provider, this.context(row, userId, signal, timeoutMs));
       if (userId && !signal.aborted) {
         const errors = (result as {errors?:Array<{code?:string}>} | null)?.errors;
         const state = errors?.some(e=>e.code === 'VERIFICATION_REQUIRED') ? 'verification-required' : errors?.some(e=>['AUTH_REQUIRED','AUTH_EXPIRED'].includes(e.code ?? '')) ? 'auth-required' : errors?.length ? null : 'reachable';
@@ -304,13 +304,14 @@ export class SourceHost {
     }
   }
 
-  private context(row: SourceRow, userId: string, signal: AbortSignal): SourceContext {
+  private context(row: SourceRow, userId: string, signal: AbortSignal, timeoutMs?: number): SourceContext {
     const instance: SourceInstance = {
       id: row.id, pluginId: row.plugin_id, sourceType: row.source_type, name: row.name,
       config: parse(row.config_json), enabled: row.enabled === 1,
     };
     return {
       instance, userId, signal,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
       credentials: this.credentials(row.id, userId),
       storage: this.storage(row.id, userId),
       log: this.log ? {

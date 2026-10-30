@@ -7,7 +7,7 @@ import type { OfflineStore } from '../store/offline.ts';
 import type { SessionCache } from '../store/session-cache.ts';
 import type { SyncEngine } from '../core/sync.ts';
 import { PublicationCache } from '../store/publications.ts';
-import { BookTransfer, type TransferMode, type TransferState } from '../core/book-transfer.ts';
+import { BookTransfer, TRANSFER_CONCURRENCY_DEFAULT, TRANSFER_CONCURRENCY_MAX, TRANSFER_DELAY_DEFAULT_MS, TRANSFER_DELAY_MAX_MS, TRANSFER_TIMEOUT_DEFAULT_MS, TRANSFER_TIMEOUT_MAX_MS, TRANSFER_TIMEOUT_MIN_MS, type TransferMode, type TransferState } from '../core/book-transfer.ts';
 import { decodeAnchor, encodeAnchor, findText, type SearchHit, type TextAnchor } from './text-anchor.ts';
 import { ApiError } from '../api/errors.ts';
 import { newId } from '../core/id.ts';
@@ -64,6 +64,12 @@ export function ReadingTools(props: ReadingToolsProps) {
    */
   const ranged = (book.format === 'chapters' || book.format === 'txt') && !!props.manifest.content;
   const [from, setFrom] = useState(1), [to, setTo] = useState(totalChapters);
+  /** Per-chapter deadline in seconds; a slow source needs more than the default 60. */
+  const [timeoutSeconds, setTimeoutSeconds] = useState(Math.round(TRANSFER_TIMEOUT_DEFAULT_MS / 1000));
+  /** How many chapters may be in flight at once. */
+  const [concurrency, setConcurrency] = useState(TRANSFER_CONCURRENCY_DEFAULT);
+  /** Pause before each chapter, in milliseconds, for a site that dislikes bursts. */
+  const [delayMs, setDelayMs] = useState(TRANSFER_DELAY_DEFAULT_MS);
   const [transfer, setTransfer] = useState<TransferState | null>(null);
   const [server, setServer] = useState<ChapterCacheInfo | null>(null);
   const [clearServer, setClearServer] = useState(false);
@@ -76,6 +82,8 @@ export function ReadingTools(props: ReadingToolsProps) {
     [props.manifest, ranged],
   );
   const visibleNotes = notes.filter(note => noteFilter === 'all' || (noteFilter === 'bookmark' ? note.type === 'bookmark' : note.type !== 'bookmark'));
+  /** Live count while a run is going: the transfer reports it after every chapter. */
+  const serverCached = transfer?.serverChapters ?? server?.chapters ?? 0;
   const bookmarked = notes.some(note => note.type === 'bookmark' && note.locator === props.locator);
   useEffect(() => { if (editing || composing) editorRef.current?.querySelector('textarea')?.focus(); }, [editing, composing]);
   async function storage() {
@@ -97,10 +105,20 @@ export function ReadingTools(props: ReadingToolsProps) {
     return () => { alive.current = false; searchRun.current?.abort(); if (task.state.status === 'running') void task.pause().catch(() => undefined); props.stopPreview(); };
   }, []);
 
+  /** The per-chapter deadline, clamped to what the server accepts. */
+  function chapterTimeoutMs(): number {
+    const seconds = Number.isFinite(timeoutSeconds) ? timeoutSeconds : TRANSFER_TIMEOUT_DEFAULT_MS / 1000;
+    return Math.min(TRANSFER_TIMEOUT_MAX_MS, Math.max(TRANSFER_TIMEOUT_MIN_MS, Math.round(seconds * 1000)));
+  }
+
   /** Run one destination to completion, then refresh what the panel reports. */
   async function startTransfer(mode: TransferMode) {
     await action(async () => {
-      await task.start(mode, ranged ? from : undefined, ranged ? to : undefined);
+      await task.start(mode, ranged ? from : undefined, ranged ? to : undefined, {
+        timeoutMs: chapterTimeoutMs(),
+        concurrency: Math.min(TRANSFER_CONCURRENCY_MAX, Math.max(1, Math.round(concurrency))),
+        delayMs: Math.min(TRANSFER_DELAY_MAX_MS, Math.max(0, Math.round(Number.isFinite(delayMs) ? delayMs : 0))),
+      });
       if (alive.current) setServer(await task.serverInfo());
       await storage();
     });
@@ -189,8 +207,14 @@ export function ReadingTools(props: ReadingToolsProps) {
       {tab === 'offline' && <section aria-label="离线与下载">
         <p>三个去处：下载到服务器（NAS 保留，所有设备共用）、缓存到浏览器（关闭浏览器自动清除）、下载到本地（保存为文件）。后两者会先把章节下载到服务器，再从这里取，不会重复请求上游。</p>
         {ranged && <div className="reading-tool-range"><label>起始章<input type="number" min={1} max={totalChapters} value={from} onInput={e => setFrom(Number(e.currentTarget.value))} /></label><label>结束章<input type="number" min={from} max={totalChapters} value={to} onInput={e => setTo(Number(e.currentTarget.value))} /></label></div>}
+        {book.format === 'chapters' && <div className="reading-tool-tuning">
+          <label>每章超时（秒）<input type="number" min={TRANSFER_TIMEOUT_MIN_MS / 1000} max={TRANSFER_TIMEOUT_MAX_MS / 1000} step={5} value={timeoutSeconds} onInput={e => setTimeoutSeconds(Number(e.currentTarget.value))} /></label>
+          <label>并发数<input type="number" min={1} max={TRANSFER_CONCURRENCY_MAX} step={1} value={concurrency} onInput={e => setConcurrency(Number(e.currentTarget.value))} /></label>
+          <label>每章间隔（毫秒）<input type="number" min={0} max={TRANSFER_DELAY_MAX_MS} step={100} value={delayMs} onInput={e => setDelayMs(Number(e.currentTarget.value))} /></label>
+          <small>服务端同一书源最多 2 路并发，超过会排队重试；站点限速时把并发降到 1 并加一点间隔。</small>
+        </div>}
         {book.format === 'chapters'
-          ? <p>服务器已缓存 {server?.chapters ?? 0} / {server?.total ?? totalChapters} 章 · {formatBytes(server?.bytes ?? 0)}</p>
+          ? <p>服务器已缓存 {serverCached} / {server?.total ?? totalChapters} 章{transfer?.status === 'running' ? '' : ` · ${formatBytes(server?.bytes ?? 0)}`}</p>
           : <p>这本书的文件已经在服务器上，不需要再下载到服务器。</p>}
         <div className="reading-tool-actions">
           {transfer?.status === 'running' ? <button className="button" onClick={() => void action(() => task.pause())}>停止</button> : <>

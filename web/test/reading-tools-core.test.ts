@@ -112,21 +112,33 @@ it('previews and applies a literal TXT heading prefix without executing regular 
  expect(loadTxt({bytes,fileName:'a.txt',bookId:'a'},{headingPrefix:'(a+)+'}).chapterCount).toBe(0);
 });
 
-it('caches a source novel on the server in batches and reports the chapters that failed', async () => {
+it('caches a source novel one chapter at a time so the panel can count them as they land', async () => {
  const cache=new PublicationCache(new MemoryKv(),new MemoryBlobs(),'server');
  const session=new SessionCache('server');
  const content={kind:'reflowable',total:45,revision:'v',groups:[{id:'all',seq:0,offset:0,count:45,title:'全部'}],items:[]};
  const manifest={book:{id:'novel',format:'chapters',title:'小说'},files:[],content} as unknown as Manifest;
- const cacheChapters=vi.fn(async (_id:string,from:number,to:number)=>({total:to-from+1,cached:to-from+1,failed:from===41?[{title:'41',code:'EMPTY_CHAPTER'}]:[]}));
+ let inFlight=0, peak=0, sentTimeout=0;
+ const cacheChapters=vi.fn(async (_id:string,from:number,to:number,options?:{timeoutMs?:number})=>{
+   inFlight+=1; peak=Math.max(peak,inFlight);
+   sentTimeout=options?.timeoutMs ?? sentTimeout;
+   await new Promise(resolve=>setTimeout(resolve,0));
+   inFlight-=1;
+   return from===41
+     ? {total:to-from+1,cached:0,failed:[{title:'41',code:'EMPTY_CHAPTER'}]}
+     : {total:to-from+1,cached:1,failed:[]};
+ });
  const api={cacheChapters,chapterCache:vi.fn(async()=>({chapters:0,bytes:0,total:45,indexes:[]}))} as unknown as ReaderApi;
  const task=new BookTransfer(api,cache,session,manifest,()=>{});
- await task.start('server',1,45);
- // 20 chapters per request: a batch that a proxy cannot cut in half.
- expect(cacheChapters).toHaveBeenCalledTimes(3);
- expect(cacheChapters).toHaveBeenNthCalledWith(3,'novel',41,45,expect.anything());
+ await task.start('server',1,45,{timeoutMs:120_000});
+ // One chapter per request, so "已缓存 N 章" moves after each of them; the source
+ // still sees at most two concurrent calls, the same as a batched request.
+ expect(cacheChapters).toHaveBeenCalledTimes(45);
+ expect(cacheChapters.mock.calls.every(call=>call[1]===call[2])).toBe(true);
+ expect(peak).toBeLessThanOrEqual(2);
+ expect(sentTimeout).toBe(120_000);
  expect(task.state.status).toBe('complete');
  expect(task.state.failed).toEqual([{title:'41',code:'EMPTY_CHAPTER'}]);
- expect(task.state.serverChapters).toBe(45);
+ expect(task.state.serverChapters).toBe(44);
 });
 it('asks only for the chapters the server is missing', async () => {
  const cache=new PublicationCache(new MemoryKv(),new MemoryBlobs(),'gaps');
@@ -145,4 +157,26 @@ it('asks only for the chapters the server is missing', async () => {
  await task.start('server',1,6);
  expect(cacheChapters).not.toHaveBeenCalled();
  expect(task.state.message).toContain('已有');
+});
+it('honours the concurrency and per-chapter delay the reader sets', async () => {
+ const cache=new PublicationCache(new MemoryKv(),new MemoryBlobs(),'tuning');
+ const session=new SessionCache('tuning');
+ const content={kind:'reflowable',total:3,revision:'v',groups:[{id:'all',seq:0,offset:0,count:3,title:'全部'}],items:[]};
+ const manifest={book:{id:'novel',format:'chapters',title:'小说'},files:[],content} as unknown as Manifest;
+ let inFlight=0, peak=0; const startedAt:number[]=[];
+ const cacheChapters=vi.fn(async()=>{
+   inFlight+=1; peak=Math.max(peak,inFlight); startedAt.push(Date.now());
+   await new Promise(resolve=>setTimeout(resolve,5));
+   inFlight-=1;
+   return {total:1,cached:1,failed:[]};
+ });
+ const api={cacheChapters,chapterCache:vi.fn(async()=>({chapters:0,bytes:0,total:3,indexes:[]}))} as unknown as ReaderApi;
+ const task=new BookTransfer(api,cache,session,manifest,()=>{});
+ await task.start('server',1,3,{concurrency:1,delayMs:40});
+ // One worker, and a pause before every chapter after the first: the polite shape
+ // for a source that limits bursts.
+ expect(peak).toBe(1);
+ expect(startedAt[1]!-startedAt[0]!).toBeGreaterThanOrEqual(35);
+ expect(startedAt[2]!-startedAt[1]!).toBeGreaterThanOrEqual(35);
+ expect(task.state.status).toBe('complete');
 });

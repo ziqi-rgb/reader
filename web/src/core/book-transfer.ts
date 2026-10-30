@@ -38,8 +38,29 @@ export interface TransferState {
   sessionPartial?: boolean;
 }
 
-/** Chapters per request: short enough that a proxy cannot cut it, long enough to be efficient. */
-const SERVER_BATCH = 20;
+/** Defaults the cache panel starts from; the reader can change all three per run. */
+export const TRANSFER_TIMEOUT_MIN_MS = 5_000;
+export const TRANSFER_TIMEOUT_MAX_MS = 300_000;
+export const TRANSFER_TIMEOUT_DEFAULT_MS = 60_000;
+export const TRANSFER_CONCURRENCY_MAX = 4;
+export const TRANSFER_CONCURRENCY_DEFAULT = 2;
+export const TRANSFER_DELAY_MAX_MS = 10_000;
+export const TRANSFER_DELAY_DEFAULT_MS = 0;
+
+export interface TransferOptions {
+  /** Deadline for one chapter's fetch from the upstream source. */
+  timeoutMs?: number;
+  /**
+   * Chapters in flight at once.
+   *
+   * The source host admits two concurrent calls per source instance, so a larger
+   * number mostly buys queueing at the server (and a `RATE_LIMITED` retry); a
+   * smaller one is the polite option for a site that dislikes bursts.
+   */
+  concurrency?: number;
+  /** Pause before each chapter, in milliseconds — for slow or rate-limiting sites. */
+  delayMs?: number;
+}
 
 export class BookTransfer {
   state: TransferState = { status: 'idle', mode: null, completed: 0, total: 0, message: '', failed: [] };
@@ -91,10 +112,10 @@ export class BookTransfer {
     return result.removed;
   }
 
-  async start(mode: TransferMode, from?: number, to?: number): Promise<void> {
+  async start(mode: TransferMode, from?: number, to?: number, options: TransferOptions = {}): Promise<void> {
     if (this.run) return;
     const run = this.run = new AbortController();
-    this.pending = this.transfer(run, mode, from, to).finally(() => { if (this.run === run) this.run = null; });
+    this.pending = this.transfer(run, mode, from, to, options).finally(() => { if (this.run === run) this.run = null; });
     await this.pending;
   }
 
@@ -111,7 +132,7 @@ export class BookTransfer {
     this.changed({ ...this.state });
   }
 
-  private async transfer(run: AbortController, mode: TransferMode, from?: number, to?: number): Promise<void> {
+  private async transfer(run: AbortController, mode: TransferMode, from?: number, to?: number, options: TransferOptions = {}): Promise<void> {
     const signal = run.signal;
     const total = this.manifest.content?.total ?? 0;
     const start = Math.max(1, from ?? 1);
@@ -121,20 +142,20 @@ export class BookTransfer {
       // pages are the book, and there is no archive to hand out.
       if (this.manifest.book.format === 'image' && this.manifest.files.length > 1) throw new Error('图片目录暂不支持整书缓存或下载');
       if (mode === 'download') {
-        await this.download(run, start, end);
+        await this.download(run, start, end, options);
         return;
       }
       this.update({ status: 'running', mode, completed: 0, total: this.perChapter ? end - start + 1 : 1, message: '正在准备', failed: [] });
       // A source novel is cached on the server first, for both destinations: that
       // is what makes the second request cheap and the copy durable.
-      if (this.fetchesUpstream) await this.cacheOnServer(start, end, signal);
+      if (this.fetchesUpstream) await this.cacheOnServer(start, end, signal, options);
       if (mode === 'server') {
         // The message comes from the run itself ("已有缓存" vs "已保存"), and the
         // count is whichever is larger: the server's own total, or what this run
         // just wrote, so a server that answers slowly cannot make the panel go
         // backwards.
         const info = await this.serverInfo();
-        this.update({ status: 'complete', serverChapters: Math.max(info?.chapters ?? 0, this.state.completed) });
+        this.update({ status: 'complete', serverChapters: Math.max(info?.chapters ?? 0, this.state.serverChapters ?? 0) });
         return;
       }
       if (mode === 'session') {
@@ -150,32 +171,66 @@ export class BookTransfer {
   /**
    * Fetch the range into the server's own storage, skipping what is already there.
    *
-   * The gap check is the whole point of asking the server first: "缓存到浏览器" and
+   * One chapter per request, two in flight: the panel's "已缓存 N 章" then moves
+   * as each chapter lands instead of jumping once at the end, and the source still
+   * sees the same two concurrent calls a batched request would have made (the
+   * server's per-request concurrency limit is two anyway).
+   *
+   * The gap check is the point of asking the server first: "缓存到浏览器" and
    * "下载到本地" both run this, and a reader who cached the book yesterday must not
-   * make the server walk 900 chapters again — let alone ask the source. Only the
-   * missing chapters are requested, in contiguous batches.
+   * make the server walk 900 chapters again — let alone ask the source.
    */
-  private async cacheOnServer(from: number, to: number, signal: AbortSignal): Promise<void> {
+  private async cacheOnServer(from: number, to: number, signal: AbortSignal, options: TransferOptions = {}): Promise<void> {
     const book = this.manifest.book;
     this.update({ completed: 0, total: to - from + 1, message: '正在检查服务器缓存' });
     const known = new Set((await this.serverInfo())?.indexes ?? []);
     const missing: number[] = [];
     for (let chapter = from; chapter <= to; chapter += 1) if (!known.has(chapter)) missing.push(chapter);
+    const span = to - from + 1;
     if (missing.length === 0) {
-      this.update({ completed: to - from + 1, total: to - from + 1, message: '服务器已有这段缓存，未重复下载' });
+      this.update({ completed: span, total: span, serverChapters: known.size, message: '服务器已有这段缓存，未重复下载' });
       return;
     }
-    let cached = missing.length === to - from + 1 ? 0 : to - from + 1 - missing.length;
+    let cached = known.size;
+    let handled = span - missing.length;
     const failed: Array<{ title: string; code: string }> = [];
-    for (const [start, end] of contiguousBatches(missing)) {
-      signal.throwIfAborted();
-      const batch = await this.api.cacheChapters(book.id, start, end, { signal });
-      cached += batch.cached;
-      failed.push(...batch.failed);
-      this.update({ completed: cached, total: to - from + 1, failed, message: `正在下载到服务器（${cached} 章）` });
-    }
+    this.update({ completed: handled, total: span, serverChapters: cached, message: `正在下载到服务器（${handled}/${span}）` });
+    let cursor = 0;
+    const concurrency = Math.max(1, Math.min(TRANSFER_CONCURRENCY_MAX, Math.round(options.concurrency ?? TRANSFER_CONCURRENCY_DEFAULT)));
+    const delayMs = Math.max(0, Math.min(TRANSFER_DELAY_MAX_MS, Math.round(options.delayMs ?? TRANSFER_DELAY_DEFAULT_MS)));
+    let started = 0;
+    const workers = Array.from({ length: Math.min(concurrency, missing.length) }, async () => {
+      for (;;) {
+        const index = cursor;
+        cursor += 1;
+        const chapter = missing[index];
+        if (chapter === undefined) return;
+        signal.throwIfAborted();
+        // A pause before each chapter (not after the last of a worker) is what makes
+        // a bursty source survive a 900-chapter run; zero means "as fast as allowed".
+        if (delayMs > 0 && started > 0) await pause(delayMs, signal);
+        started += 1;
+        const batch = await this.api.cacheChapters(book.id, chapter, chapter, {
+          signal,
+          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        });
+        cached += batch.cached;
+        handled += 1;
+        failed.push(...batch.failed);
+        // After every chapter, not every batch: this line is the reader's only
+        // evidence that a long download is making progress.
+        this.update({ completed: handled, total: span, serverChapters: cached, failed: [...failed], message: `正在下载到服务器（${cached} 章 · ${handled}/${span}）` });
+      }
+    });
+    await Promise.all(workers);
     signal.throwIfAborted();
-    this.update({ failed, serverChapters: cached, message: failed.length ? `${cached} 章已保存到服务器，${failed.length} 章失败` : `${cached} 章已保存到服务器` });
+    this.update({
+      failed,
+      serverChapters: cached,
+      completed: span,
+      total: span,
+      message: failed.length ? `${cached} 章已保存到服务器，${failed.length} 章失败` : `${cached} 章已保存到服务器`,
+    });
   }
 
   /** Pull the range from this server into the session cache. */
@@ -216,11 +271,11 @@ export class BookTransfer {
     }
   }
 
-  private async download(run: AbortController, from: number, to: number): Promise<void> {
+  private async download(run: AbortController, from: number, to: number, options: TransferOptions = {}): Promise<void> {
     const book = this.manifest.book, signal = run.signal;
     if (this.fetchesUpstream) {
       this.update({ status: 'running', mode: 'download', completed: 0, total: to - from + 1, message: '正在下载到服务器', failed: [] });
-      await this.cacheOnServer(from, to, signal);
+      await this.cacheOnServer(from, to, signal, options);
       signal.throwIfAborted();
       this.update({ message: '正在打包下载' });
       const zip = await this.api.chapterCacheZip(book.id, { signal });
@@ -237,21 +292,20 @@ export class BookTransfer {
   }
 }
 
-/** Split the missing chapter numbers into contiguous requests of at most `SERVER_BATCH`. */
-function contiguousBatches(missing: readonly number[]): Array<[number, number]> {
-  const batches: Array<[number, number]> = [];
-  for (const chapter of missing) {
-    const last = batches[batches.length - 1];
-    if (last && chapter === last[1] + 1 && last[1] - last[0] + 1 < SERVER_BATCH) last[1] = chapter;
-    else batches.push([chapter, chapter]);
-  }
-  return batches;
-}
-
 function fileNameOf(manifest: Manifest, fallback: string): string {
   const relPath = manifest.files.find((file) => file.missing === 0)?.rel_path ?? manifest.files[0]?.rel_path;
   const name = relPath?.split('/').pop();
   return name && name.trim() ? name : fallback || 'book';
+}
+
+/** Waits, but gives up the moment the run is stopped. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return; }
+    const timer = setTimeout(() => { signal.removeEventListener('abort', cancel); resolve(); }, ms);
+    const cancel = () => { clearTimeout(timer); reject(signal.reason); };
+    signal.addEventListener('abort', cancel, { once: true });
+  });
 }
 
 /** Hand a blob to the browser's own download path, then release the URL. */

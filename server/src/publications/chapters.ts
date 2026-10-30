@@ -17,8 +17,8 @@ export const MAX_CHAPTERS = 10_000;
 const MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 
 interface ChapterLoader {
-  manifest(userId: string, sourceId: string, publicationRef: string, signal?: AbortSignal): Promise<ManifestSnapshot>;
-  resource(userId: string, sourceId: string, publicationRef: string, ref: string, signal?: AbortSignal): Promise<ResourceResponse>;
+  manifest(userId: string, sourceId: string, publicationRef: string, signal?: AbortSignal, timeoutMs?: number): Promise<ManifestSnapshot>;
+  resource(userId: string, sourceId: string, publicationRef: string, ref: string, signal?: AbortSignal, timeoutMs?: number): Promise<ResourceResponse>;
 }
 
 interface PublicationRow {
@@ -175,8 +175,8 @@ export class ChapterPublications {
     });
   }
 
-  asset(userId: string, bookId: string, ref: string, signal?: AbortSignal, force = false): Promise<AssetPayload> {
-    signal = signal ? AbortSignal.any([signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000);
+  asset(userId: string, bookId: string, ref: string, signal?: AbortSignal, force = false, timeoutMs = 60_000): Promise<AssetPayload> {
+    signal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
     this.owned(userId, bookId);
     const match = /^chapter-resource:([a-f0-9]{64}):([a-f0-9]{64})$/.exec(ref);
     if (!match) return Promise.reject(badRequest('chapter assets require the manifest resourceRef', 'INVALID_RESOURCE'));
@@ -192,7 +192,7 @@ export class ChapterPublications {
       resource.media_type = chapterMedia(resource.media_type);
       if (!force && resource.body !== null) return this.payload(resource.body, resource.content_hash!, resource.media_type);
       this.requireCurrent(publication, revision!);
-      const response = await this.loader.resource(userId, publication.source_id, publication.publication_ref, resource.provider_ref, signal);
+      const response = await this.loader.resource(userId, publication.source_id, publication.publication_ref, resource.provider_ref, signal, timeoutMs);
       if (chapterMedia(response.mediaType) !== resource.media_type) {
         response.stream?.destroy();
         throw badRequest('chapter resource type differs from its manifest', 'INVALID_RESOURCE');
@@ -201,7 +201,7 @@ export class ChapterPublications {
       if (resource.media_type.startsWith('text/html')) {
         body = await richContent(body, (imageRef) => {
           signal?.throwIfAborted();
-          return this.loader.resource(userId, publication.source_id, publication.publication_ref, imageRef, signal);
+          return this.loader.resource(userId, publication.source_id, publication.publication_ref, imageRef, signal, timeoutMs);
         });
       }
       requireChapterContent(body, resource.media_type);
@@ -234,7 +234,7 @@ export class ChapterPublications {
    */
   async prefetch(
     userId: string, bookId: string, from: number, to: number,
-    files?: UserChapterCache, signal?: AbortSignal,
+    files?: UserChapterCache, signal?: AbortSignal, timeoutMs?: number,
   ): Promise<{ total: number; cached: number; failed: Array<{ title: string; code: string }> }> {
     const items = this.manifest(userId, bookId).items.filter((item) => item.seq >= from - 1 && item.seq < to);
     const failed: Array<{ title: string; code: string }> = [];
@@ -250,7 +250,7 @@ export class ChapterPublications {
         signal?.throwIfAborted();
         try {
           if (!item.resourceRef) throw badRequest('chapter has no content reference', 'SOURCE_UNSUPPORTED');
-          const payload = await this.fetchChapter(userId, bookId, item.resourceRef, signal);
+          const payload = await this.fetchChapter(userId, bookId, item.resourceRef, signal, timeoutMs);
           if (files && payload.data) {
             await files.write(userId, bookId, item.seq + 1, item.title, chapterText(payload.data.toString('utf8'), payload.contentType));
           }
@@ -273,14 +273,15 @@ export class ChapterPublications {
    * batch is to be patient: retrying a second later costs nothing, while giving
    * up would put a chapter in `failed` that would have succeeded.
    */
-  private async fetchChapter(userId: string, bookId: string, ref: string, signal?: AbortSignal): Promise<AssetPayload> {
+  private async fetchChapter(userId: string, bookId: string, ref: string, signal?: AbortSignal, timeoutMs?: number): Promise<AssetPayload> {
+    const deadline = timeoutMs ?? 60_000;
     try {
-      return await this.asset(userId, bookId, ref, signal);
+      return await this.asset(userId, bookId, ref, signal, false, deadline);
     } catch (error) {
       if (!(error instanceof AppError) || error.code !== 'RATE_LIMITED') throw error;
       await new Promise((resolve) => setTimeout(resolve, 500));
       signal?.throwIfAborted();
-      return this.asset(userId, bookId, ref, signal);
+      return this.asset(userId, bookId, ref, signal, false, deadline);
     }
   }
 

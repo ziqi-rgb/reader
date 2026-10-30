@@ -757,6 +757,7 @@ test('default search source is exclusive, persistent, admin-managed and cleared 
 
 test('chapter-cache routes keep chapters on this server and hand them back as a zip', async (t) => {
   const h = await harness(); t.after(() => h.close());
+  const seenTimeouts: Array<number | undefined> = [];
   const provider: SourceProvider = {
     descriptor: {
       id: 'cache-chapters', label: '缓存源', version: '1',
@@ -773,7 +774,13 @@ test('chapter-cache routes keep chapters on this server and hand them back as a 
         ],
       };
     },
-    async readResource(_ctx, request) { return { mediaType: 'text/plain; charset=utf-8', text: request.ref + ' 正文' }; },
+    async readResource(ctx, request) {
+      // The reader's per-chapter deadline has to reach the provider, not stop at
+      // the HTTP layer: the plugin process has its own default, and the shortest
+      // one wins.
+      seenTimeouts.push(ctx.timeoutMs);
+      return { mediaType: 'text/plain; charset=utf-8', text: request.ref + ' 正文' };
+    },
   };
   h.ctx.sources!.registry.register({ pluginId: 'test.cache', provider });
   await h.ctx.sources!.create({ id: 'cache-instance', pluginId: 'test.cache', sourceType: 'cache-chapters', name: '缓存源', config: {} });
@@ -781,9 +788,10 @@ test('chapter-cache routes keep chapters on this server and hand them back as a 
   assert.equal(acquired.statusCode, 200, acquired.body);
   const bookId = acquired.json().publicationId as string;
 
-  const cached = await h.app.inject({ method: 'POST', url: `/api/v1/books/${bookId}/chapter-cache`, headers: auth(h.admin), payload: { from: 1, to: 2 } });
+  const cached = await h.app.inject({ method: 'POST', url: `/api/v1/books/${bookId}/chapter-cache`, headers: auth(h.admin), payload: { from: 1, to: 2, timeoutMs: 12_000 } });
   assert.equal(cached.statusCode, 200, cached.body);
   assert.deepEqual(cached.json(), { total: 2, cached: 2, failed: [] });
+  assert.deepEqual(seenTimeouts, [12_000, 12_000]);
 
   const info = await h.app.inject({ method: 'GET', url: `/api/v1/books/${bookId}/chapter-cache`, headers: auth(h.admin) });
   assert.equal(info.json().chapters, 2); assert.equal(info.json().total, 2); assert.ok(info.json().bytes > 0);
@@ -803,6 +811,10 @@ test('chapter-cache routes keep chapters on this server and hand them back as a 
   assert.equal(badRange.json().error.code, 'INVALID_RANGE');
   const badNumber = await h.app.inject({ method: 'POST', url: `/api/v1/books/${bookId}/chapter-cache`, headers: auth(h.admin), payload: { from: 0, to: 2 } });
   assert.equal(badNumber.statusCode, 400);
+  // The per-chapter deadline is bounded: a typo must not park a fetch for an hour.
+  const badTimeout = await h.app.inject({ method: 'POST', url: `/api/v1/books/${bookId}/chapter-cache`, headers: auth(h.admin), payload: { from: 1, to: 2, timeoutMs: 1_000 } });
+  assert.equal(badTimeout.statusCode, 400);
+  assert.equal(badTimeout.json().error.code, 'INVALID_TIMEOUT');
 
   const cleared = await h.app.inject({ method: 'DELETE', url: `/api/v1/books/${bookId}/chapter-cache`, headers: auth(h.admin) });
   assert.deepEqual(cleared.json(), { removed: 2 });

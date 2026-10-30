@@ -44,6 +44,15 @@ export interface SourceContext {
   /** User id scopes cache and credential access. */
   readonly userId: string;
   readonly signal: AbortSignal;
+  /**
+   * The deadline the caller allowed for this call, in milliseconds.
+   *
+   * Providers with their own per-call deadline (a plugin process, an HTTP client)
+   * must honour this instead of their default: a reader who raises the timeout for
+   * a slow source has to have it raised everywhere that source is called, or the
+   * shortest default wins and the setting does nothing.
+   */
+  readonly timeoutMs?: number;
   readonly http?: SourceHttpClient;
   readonly credentials?: CredentialStore;
   readonly storage?: SourceStorage;

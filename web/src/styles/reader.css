@@ -4158,6 +4158,9 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
 .reading-tool-results span { display: block; white-space: pre-wrap; }
 .reading-tool-range { display: flex; gap: 1rem; }
 .reading-tool-range label { min-width: 0; }
+.reading-tool-tuning { display: grid; gap: .5rem; grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr)); }
+.reading-tool-tuning label { display: grid; gap: .3rem; min-width: 0; }
+.reading-tool-tuning small { grid-column: 1 / -1; opacity: .75; }
 .toc-list li:has(.toc-collapse) { display: flex; }
 .toc-list .toc-collapse { width: 2rem; flex: 0 0 2rem; justify-content: center; }
 

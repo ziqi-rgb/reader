@@ -402,11 +402,24 @@ export class ReaderApi {
    * Keep a chapter range on this server.
    *
    * The loop is the caller's, deliberately: caching a 900-chapter novel is a
-   * minutes-long job, and a client that drives it in batches can show progress,
-   * stop, and survive a proxy that would cut one long request in half.
+   * minutes-long job, and a client that drives it can show progress, stop, and
+   * survive a proxy that would cut one long request in half.
+   *
+   * `timeoutMs` is the per-chapter deadline for the fetch from the upstream
+   * source, not for this request: a slow site needs a longer one, and it has to
+   * reach the provider's own deadline or the shortest default wins.
    */
-  async cacheChapters(id: string, from: number, to: number, options: RequestOptions = {}): Promise<import('./types.ts').ChapterCacheBatch> {
-    return this.call(`/api/v1/books/${encodeURIComponent(id)}/chapter-cache`, 'POST', { from, to }, options);
+  async cacheChapters(
+    id: string, from: number, to: number,
+    options: RequestOptions & { timeoutMs?: number } = {},
+  ): Promise<import('./types.ts').ChapterCacheBatch> {
+    const { timeoutMs, ...rest } = options;
+    return this.call(
+      `/api/v1/books/${encodeURIComponent(id)}/chapter-cache`,
+      'POST',
+      { from, to, ...(timeoutMs === undefined ? {} : { timeoutMs }) },
+      rest,
+    );
   }
 
   /** What this server already keeps of the book, for the reader's own account. */

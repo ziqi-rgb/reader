@@ -25,6 +25,17 @@ function chapterNumber(value: unknown, name: string): number {
   return value;
 }
 
+/** Per-chapter deadline: 5 s to 5 min, defaulting to the server's own 60 s. */
+const CHAPTER_CACHE_TIMEOUT_MIN = 5_000;
+const CHAPTER_CACHE_TIMEOUT_MAX = 300_000;
+function chapterTimeout(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < CHAPTER_CACHE_TIMEOUT_MIN || value > CHAPTER_CACHE_TIMEOUT_MAX) {
+    throw badRequest(`每章超时应为 ${CHAPTER_CACHE_TIMEOUT_MIN / 1000}–${CHAPTER_CACHE_TIMEOUT_MAX / 1000} 秒`, 'INVALID_TIMEOUT');
+  }
+  return value;
+}
+
 function textBody(body: unknown, name: string): string {
   const value = (body as Record<string, unknown> | null)?.[name];
   return parameter(value, name, true)!;
@@ -204,7 +215,11 @@ export function registerSourceRoutes(app: FastifyInstance, ctx: AppContext): voi
     const from = chapterNumber(body.from, 'from'), to = chapterNumber(body.to, 'to');
     if (to < from) throw badRequest('章节范围无效', 'INVALID_RANGE');
     if (to - from + 1 > CHAPTER_CACHE_BATCH) throw badRequest(`一次最多缓存 ${CHAPTER_CACHE_BATCH} 章`, 'RANGE_TOO_LARGE');
-    return withSignal(request, reply, signal => host.prefetchChapters(user.id, id, from, to, signal));
+    // Slow sources exist: the reader can raise the per-chapter deadline from the
+    // cache panel, and it has to reach the deepest layer (the plugin process's own
+    // per-call deadline) or the shortest default wins and the setting does nothing.
+    const timeoutMs = chapterTimeout(body.timeoutMs);
+    return withSignal(request, reply, signal => host.prefetchChapters(user.id, id, from, to, signal, timeoutMs));
   });
 
   /** What is already on the server for this book, in the reader's own directory. */
