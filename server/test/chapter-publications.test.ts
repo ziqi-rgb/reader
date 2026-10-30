@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,8 +34,28 @@ test('quality inspection is read-only and empty refresh or switch preserves the 
   } finally { f.db.close(); await rm(f.root, { recursive: true, force: true }); }
 });
 
+test('a source cover is stored on acquisition, and a failing cover never blocks it', async () => {
+  const f = await fixture();
+  try {
+    f.provider.cover = async () => ({ mediaType: 'image/png', data: Buffer.from('89504e470d0a1a0a', 'hex') });
+    const withCover = await f.chapters.acquire(f.provider, f.context, { entryRef: 'book' }, 'book-cover', { ref: 'book', title: '有封面' });
+    const stored = f.db.get<{ cover_path: string | null }>('SELECT cover_path FROM books WHERE id = ?', withCover);
+    assert.match(stored?.cover_path ?? '', /^covers[\\/]/);
+    assert.equal(existsSync(join(f.dataDir, stored!.cover_path!)), true);
+
+    // 封面是展示信息：来源取不到、或给出的不是图片时，入架必须照常成功。
+    f.provider.cover = async () => { throw new Error('offline'); };
+    const noCover = await f.chapters.acquire(f.provider, f.context, { entryRef: 'book' }, 'book-offline', { ref: 'book', title: '离线' });
+    assert.equal(f.db.get<{ cover_path: string | null }>('SELECT cover_path FROM books WHERE id = ?', noCover)?.cover_path, null);
+    f.provider.cover = async () => ({ mediaType: 'image/png', text: 'not an image' });
+    const badCover = await f.chapters.acquire(f.provider, f.context, { entryRef: 'book' }, 'book-bad', { ref: 'book', title: '坏封面' });
+    assert.equal(f.db.get<{ cover_path: string | null }>('SELECT cover_path FROM books WHERE id = ?', badCover)?.cover_path, null);
+  } finally { f.db.close(); await rm(f.root, { recursive: true, force: true }); }
+});
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'reader-chapters-'));
+  const dataDir = join(root, 'data');
   const db = new Db(join(root, 'reader.db'));
   db.run(`INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES ('u1','u1','x','member',0,0)`);
   db.run(`INSERT INTO source_instances (id, plugin_id, source_type, name, created_at) VALUES ('s1','p1','chapters','源',0)`);
@@ -48,17 +69,17 @@ async function fixture() {
     descriptor: { id: 'chapters', label: '章节', version: '1', capabilities: ['detail', 'acquire.chapters', 'content.manifest', 'content.resource'] },
     async detail() { return { ref: 'book', title: '远程书' }; },
     async acquire() { return { kind: 'chapters', publicationRef: 'book' }; },
-    async getManifest() { return { publicationRef: 'book', version: 'v1', items }; },
+    async getManifest(_ctx, publicationRef) { return { publicationRef, version: 'v1', items }; },
     async readResource(_ctx, request) {
       const item = items.find((entry) => entry.ref === request.ref);
       return { mediaType: 'text/plain; charset=utf-8', text: item ? `<${item.title}> 正文` : '' };
     },
   };
   const chapters = new ChapterPublications(db, {
-    manifest: async () => provider.getManifest!(context, 'book'),
+    manifest: async (_user, _source, publicationRef) => provider.getManifest!(context, publicationRef),
     resource: async (_user, _source, _publication, ref) => provider.readResource!(context, { publicationRef: 'book', ref }),
-  });
-  return { root, db, context, provider, chapters, setItems(next: typeof items) { items = next; } };
+  }, dataDir);
+  return { root, db, dataDir, context, provider, chapters, setItems(next: typeof items) { items = next; } };
 }
 
 test('rich chapter snapshots cache sanitised HTML and images across reloads', async () => {

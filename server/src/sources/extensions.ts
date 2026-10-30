@@ -78,7 +78,11 @@ export function extensionFields(input: unknown): ExtensionField[] {
 }
 export function searchFilterFields(input: unknown): ExtensionField[] {
   const fields = extensionFields(input);
-  check(fields.every(field => field.type === 'select'));
+  // Search filters sit in the row above the search box. A dropdown is the common case; a
+  // single free-text field is allowed because some sources need words rather than a choice
+  // (a plugin's "exclude these titles/tags/authors" filter). Anything else — a password, a
+  // file upload, a number — has no place in a search query, so it stays rejected here.
+  check(fields.every(field => field.type === 'select' || field.type === 'text'));
   return fields;
 }
 export function extensionPage(input: unknown): ExtensionPage {

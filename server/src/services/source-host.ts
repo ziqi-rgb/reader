@@ -38,7 +38,7 @@ export class SourceHost {
       resource: (userId, sourceId, publicationRef, ref, signal) => this.call(userId, sourceId, (provider, ctx) => provider.readResource
         ? provider.readResource(ctx, { publicationRef, ref })
         : Promise.reject(badRequest('source has no chapter resources', 'SOURCE_UNSUPPORTED')), signal),
-    });
+    }, config.dataDir);
     this.registry.registerBuiltin('reader.local', createLocalProvider(db, shelf));
     this.updates = new ChapterUpdates(db, this.chapters);
     this.registry.registerBuiltin('reader.opds', createOpdsProvider());

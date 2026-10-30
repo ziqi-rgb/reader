@@ -17,7 +17,7 @@ export class SourceRegistryError extends Error {
 const ID_RE = /^[a-z][a-z0-9._-]{0,127}$/;
 const CAPABILITIES = new Set<SourceCapability>([
   'search.filters', 'search.cancel', 'search.session', 'content.alternatives', 'browse', 'search', 'detail', 'acquire.file', 'acquire.chapters',
-  'content.manifest', 'content.resource', 'content.update',
+  'content.manifest', 'content.resource', 'content.cover', 'content.update',
 ]);
 
 function assertDescriptor(descriptor: SourceDescriptor): void {
@@ -65,6 +65,7 @@ function assertProvider(provider: SourceProvider): void {
   requireMethod('content.alternatives', 'alternatives');
   requireMethod('content.manifest', 'getManifest');
   requireMethod('content.resource', 'readResource');
+  requireMethod('content.cover', 'cover');
   requireMethod('content.update', 'getManifest');
   if (caps.has('acquire.chapters')) {
     if (typeof provider.getManifest !== 'function' || typeof provider.readResource !== 'function') {

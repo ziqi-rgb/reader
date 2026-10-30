@@ -14,6 +14,7 @@ export type SourceCapability =
   | 'acquire.chapters'
   | 'content.manifest'
   | 'content.resource'
+  | 'content.cover'
   | 'content.update';
 
 export interface SourceDescriptor {
@@ -205,6 +206,12 @@ export interface ResourceRequest {
   readonly rendition?: 'text' | 'html' | 'binary';
 }
 
+/** Cover lookup for one catalog entry; the host stores the bytes on the acquired book. */
+export interface CoverRequest {
+  readonly entryRef: string;
+  readonly publicationRef: string;
+}
+
 export interface ResourceResponse {
   readonly mediaType: string;
   readonly data?: Uint8Array;
@@ -230,6 +237,8 @@ export interface SourceProvider {
   openFile?(ctx: SourceContext, acquisition: Extract<Acquisition, { kind: 'file' }>): Promise<ResourceResponse>;
   getManifest?(ctx: SourceContext, publicationRef: string): Promise<ManifestSnapshot>;
   readResource?(ctx: SourceContext, request: ResourceRequest): Promise<ResourceResponse>;
+  /** Optional cover bytes, so acquiring a chapter publication can store a shelf cover. */
+  cover?(ctx: SourceContext, request: CoverRequest): Promise<ResourceResponse>;
 }
 
 export interface SourceRegistration {

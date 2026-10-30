@@ -2,9 +2,10 @@ import { requireChapterContent } from './chapter-quality.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Db } from '../db/index.ts';
 import type { AssetPayload, Manifest } from '../indexer/formats/registry.ts';
+import { saveCover } from '../indexer/metadata.ts';
 import { AppError, badRequest, conflict, notFound } from '../lib/errors.ts';
 import { decodeManifest } from '../sources/protocol.ts';
-import { chapterMedia, richContent } from './rich-content.ts';
+import { chapterMedia, raster, richContent } from './rich-content.ts';
 import type {
   AcquireRequest, CatalogEntry, ManifestSnapshot, ResourceResponse, SourceContext, SourceProvider,
 } from '../sources/types.ts';
@@ -42,7 +43,8 @@ function hash(value: string): string {
 export class ChapterPublications {
   private readonly queues = new Map<string, Promise<unknown>>();
 
-  constructor(private readonly db: Db, private readonly loader: ChapterLoader) {}
+  /** `dataDir` is where covers are stored; without it acquisitions simply have no cover. */
+  constructor(private readonly db: Db, private readonly loader: ChapterLoader, private readonly dataDir?: string) {}
 
   has(bookId: string): boolean {
     return !!this.db.get('SELECT book_id FROM chapter_publications WHERE book_id = ?', bookId);
@@ -91,14 +93,17 @@ export class ChapterPublications {
         }
         const snapshotJson = JSON.stringify(snapshot);
         const revision = hash(snapshotJson);
+        // 封面只是书籍的展示信息：取不到不能挡住入架，所以失败只当作没封面。
+        const coverPath = await this.coverPath(provider, context, request, publicationRef, bookId);
+        context.signal.throwIfAborted();
         const now = Date.now();
         this.db.transaction(() => {
           this.db.run(
             `INSERT INTO books (id, content_hash, content_hash_kind, format, title, author, language, description,
-             pubdate, page_count, meta_json, source, created_at, updated_at) VALUES (?, ?, 'manifest', 'chapters', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             pubdate, page_count, meta_json, source, cover_path, created_at, updated_at) VALUES (?, ?, 'manifest', 'chapters', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             bookId, revision, entry.title, entry.authors?.join(', ') ?? '', entry.language ?? '',
             entry.description ?? '', entry.publishedAt ?? '', snapshot.items.length,
-            JSON.stringify({ kind: 'text' }), `provider:${context.instance.pluginId}`, now, now,
+            JSON.stringify({ kind: 'text' }), `provider:${context.instance.pluginId}`, coverPath ?? null, now, now,
           );
           this.db.run(
             `INSERT INTO chapter_publications (book_id, user_id, source_id, publication_ref, revision, version, snapshot_json, updated_at)
@@ -238,6 +243,26 @@ export class ChapterPublications {
       });
       return { content: this.manifest(context.userId, bookId), href: 'chapter:' + hash(chapterId) };
     });
+  }
+
+  /**
+   * Asks the source for this entry's cover and stores it under `DATA_DIR/covers`.
+   *
+   * A cover is cosmetic: a missing `cover()` method, an unsupported image, a network error
+   * or an oversized file all mean "acquire without a cover", never "fail the acquisition".
+   */
+  private async coverPath(
+    provider: SourceProvider, context: SourceContext, request: AcquireRequest,
+    publicationRef: string, bookId: string,
+  ): Promise<string | undefined> {
+    if (!provider.cover || !this.dataDir) return undefined;
+    try {
+      const response = await provider.cover(context, { entryRef: request.entryRef, publicationRef });
+      const { type, bytes } = raster(response);
+      return await saveCover(this.dataDir, bookId, { data: bytes, contentType: type });
+    } catch {
+      return undefined;
+    }
   }
 
   private owned(userId: string, bookId: string): PublicationRow {

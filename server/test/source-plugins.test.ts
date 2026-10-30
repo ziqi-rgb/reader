@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { ProcessPlugin } from '../src/sources/process-plugin.ts';
 import { SourceRegistry, validatePluginManifest } from '../src/sources/registry.ts';
+import { searchFilterFields } from '../src/sources/extensions.ts';
 import { decodeCatalogPage, decodeChapterAcquisition, decodeManifest } from '../src/sources/protocol.ts';
 import type { PluginManifest, SourceContext, SourceProvider } from '../src/sources/types.ts';
 
@@ -350,6 +351,45 @@ test('plugin entry cannot escape its package directory', async () => {
     await writeFile(join(source.directory, 'package', 'plugin.json'), JSON.stringify({ ...manifest, entry: '../main.mjs' }));
     await assert.rejects(ProcessPlugin.load(join(source.directory, 'package')), { code: 'PLUGIN_INVALID' });
   } finally {
+    await source.dispose();
+  }
+});
+
+test('search filters allow one free-text field and reject types a query string cannot carry', () => {
+  const field = (type: string) => ({ key: type === 'language' ? 'language' : 'exclude', label: 'Filter', type });
+  const select = { key: 'language', label: 'Language', type: 'select', options: [{ value: 'zh-cn', label: '中文' }] };
+  assert.deepEqual(searchFilterFields([select, field('text')]).map(item => item.type), ['select', 'text']);
+  for (const type of ['password', 'textarea', 'number', 'boolean', 'file']) {
+    assert.throws(() => searchFilterFields([field(type)]), { code: 'INVALID_EXTENSION' });
+  }
+});
+
+test('search filters reach the plugin alongside the query', async () => {
+  const source = await fixture(`
+    import { createInterface } from 'node:readline';
+    const fields = [
+      { key: 'language', label: 'Language', type: 'select', options: [{ value: 'zh-cn', label: '中文' }] },
+      { key: 'exclude', label: 'Exclude', type: 'text', placeholder: 'words' },
+    ];
+    createInterface({ input: process.stdin }).on('line', line => {
+      const request = JSON.parse(line);
+      const result = request.method === 'searchFilters'
+        ? fields
+        : { items: [{ ref: 'book', title: JSON.stringify(request.params.request.filters ?? null) }] };
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');
+    });
+  `);
+  await writeFile(join(source.directory, 'plugin.json'), JSON.stringify({ ...manifest,
+    sourceTypes: [{ id: 'test', label: 'Test', capabilities: ['detail', 'search', 'search.filters'] }],
+  }));
+  const plugin = await ProcessPlugin.load(source.directory);
+  try {
+    const provider = plugin.providers()[0]!;
+    assert.deepEqual((await provider.searchFilters!(context())).map(field => field.type), ['select', 'text']);
+    const page = await provider.search!(context(), { query: '魔法', filters: { language: 'zh-cn', exclude: '重生' } });
+    assert.equal(page.items[0]?.title, JSON.stringify({ language: 'zh-cn', exclude: '重生' }));
+  } finally {
+    await plugin.close();
     await source.dispose();
   }
 });

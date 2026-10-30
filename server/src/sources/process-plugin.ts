@@ -136,6 +136,9 @@ export class ProcessPlugin {
       if (type.capabilities.includes('content.resource')) {
         provider.readResource = async (ctx, request) => decodeResource(await call('readResource', ctx, { request }));
       }
+      if (type.capabilities.includes('content.cover')) {
+        provider.cover = async (ctx, request) => decodeResource(await call('cover', ctx, { request }));
+      }
       // File transfer through this bounded JSON channel is intentionally unsupported.
       if (type.capabilities.includes('acquire.file')) {
         throw new PluginError('PLUGIN_INCOMPATIBLE', 'process plugins currently support chapter resources only');
