@@ -648,6 +648,46 @@ manifest 的每个条目还带 `ref`，即这个文件对应的**资源引用**�
 
 `scope=library` 和单本 `GET /books/:id` 不带这个字段。
 
+### `GET /books/:id/toc-preview?headingPrefix=<可选>&limit=100`
+
+按候选目录规则试算章节标题，不保存、不需要下载文件。`headingPrefix` 为字面前缀（≤60 字，不执行正则），省略时用自动识别；当前账号的手动分章点会一并计入。返回 `{ "titles": ["前言", "新的开始。"], "total": 2 }`；书源小说或不支持自定义目录的格式返回 400 `CUSTOM_TOC_UNSUPPORTED`。
+
+## 章节缓存与导出（书源小说）
+
+书源小说的正文只有在被请求时才会缓存到服务端（`chapter_resources`）。下面四条路由让客户端可以先把一段时间内要读的章节抓到服务器，再决定是下载文件还是只在会话里缓存，从而不必每台设备、每次清缓存都重新请求书源。
+
+只有 `format = "chapters"` 的书可用；本地文件书（txt/epub/pdf/cbz）的文件本来就在服务器上，这些路由对它们返回 `CACHE_REQUIRES_CHAPTERS`。
+
+### `POST /books/:id/chapter-cache`
+
+```json
+{ "from": 1, "to": 20 }
+```
+
+按章节抓取并保存到 `DATA_DIR/user-cache/<账号>/<书>/`（每章一个 `NNNN 标题.txt`）以及服务端章节缓存。单次最多 200 章，客户端分批循环并展示进度。返回：
+
+```json
+{ "total": 20, "cached": 19, "failed": [{ "title": "第七章", "code": "EMPTY_CHAPTER" }] }
+```
+
+单章失败不会回滚已成功的章节；同一来源的并发上限沿用源宿主的两路限制，偶发 `RATE_LIMITED` 会自动重试一次。
+
+### `GET /books/:id/chapter-cache`
+
+```json
+{ "chapters": 20, "bytes": 418304, "total": 913, "indexes": [1, 2, 3, 4] }
+```
+
+`chapters` 是当前账号在服务器上已有的章节数，`total` 是书籍总章数，`indexes` 是已缓存章节的序号（从 1 开始）。客户端据此只请求缺口：客户端在「下载到服务器」「缓存到浏览器」「下载到本地」之前都会先读一次这里的 `indexes`，已经全部缓存时分批预取压根不会发出。
+
+### `DELETE /books/:id/chapter-cache`
+
+删除当前账号这本书的服务器缓存，返回 `{ "removed": 20 }`。书籍本身、阅读进度和笔记不受影响。
+
+### `GET /books/:id/chapter-cache/zip`
+
+把已缓存的章节打成 zip（每章一个 txt）下载，响应带 `content-disposition`。没有缓存时返回 400 `NO_SERVER_CACHE`。
+
 ## 朗读（HTTP TTS）
 
 这两条路由只在服务端配置了 HTTP 朗读合成接口 时才有意义，并且分工明确：
@@ -1030,7 +1070,9 @@ All `/api/v1/admin/settings` routes require an administrator bearer token. Respo
 
 All endpoints require the account access token in the Authorization header. Reading overrides additionally check book access.
 
-- GET /api/v1/books/:id/reading-overrides returns { version, headingPrefix, corrections }.
+- GET /api/v1/books/:id/reading-overrides returns { version, headingPrefix, corrections, chapterMarks }.
 - PUT /api/v1/books/:id/reading-overrides accepts the same object. A correction contains id, anchor (sectionId, start, end, quote, prefix, suffix), and replacement. The submitted version must match the latest version; stale writes return 409. Up to 500 corrections are allowed, with each quote/replacement at most 4,000 characters. headingPrefix is a literal prefix of at most 60 characters.
+- headingPrefix and chapterMarks are applied by the **server** when it publishes a TXT's manifest, TOC and chapters: they are the account's chapter structure, so the client never has to download the file to disagree with the server about it. A reader with a heading prefix therefore still reads chapter by chapter, over `chapter:<n>` references, exactly like a reader without one.
+- chapterMarks are chapter breaks the reader placed by hand, which is how a heading-less TXT gets a navigable structure: each is { id, title, quote, prefix, suffix }, where quote is the selected passage that begins the new chapter (located in the file's own characters, so it survives re-splitting) and title is at most 60 characters. Up to 200 marks are allowed; a request that omits the field keeps the stored marks, because an older client does not know it.
 - POST /api/v1/books/:id/reading-overrides/undo accepts { version } and saves the preceding snapshot as a new version. History is scoped to account/book and stored in DATA_DIR/reader.db; it never rewrites library files.
 - POST /api/v1/tts/test accepts { voice?, speed? }, synthesizes a fixed sample and returns { bytes, contentType, elapsedMs, cached }. Failure codes include TTS_DISABLED, TTS_AUTH, TTS_TIMEOUT, TTS_CONTENT, TTS_EMPTY and TTS_UPSTREAM. It does not accept an upstream URL. Audio playback remains GET /api/v1/tts.
