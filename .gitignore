@@ -39,3 +39,7 @@ web/dist/
 
 # Exported docker images (docker save output, ~1 GB each)
 /*.tar
+
+# Local-only plugin workspaces and docs (demo-chapters stays published)
+/examples/plugins/*
+!/examples/plugins/demo-chapters/
