@@ -121,6 +121,14 @@ export interface BookGroup extends BookGroupRef {
   bookCount: number;
   /** Books in it and in everything below it, de-duplicated. */
   subtreeCount: number;
+  /**
+   * The same two counts in *slots*: a 丛书 counts once.
+   *
+   * What the shelf draws — one card per 丛书 — and what 「丛书算一本」 shows. The
+   * server sends both so switching the setting needs no round trip.
+   */
+  slotCount?: number;
+  subtreeSlotCount?: number;
   /** 1-based depth, at most 3. */
   level: number;
   parentId: string | null;
@@ -142,7 +150,15 @@ export type ReadingState = 'reading' | 'want' | 'finished';
 
 export interface BookListPage {
   items: Book[];
+  /**
+   * **Slots** on the page — a book, or a whole 丛书 — not books.
+   *
+   * The shelf pages by what it draws: one card per slot. A 丛书 of 35 volumes is
+   * one slot, so this is also the number the pager counts.
+   */
   total: number;
+  /** The books behind those slots. Only differs from `total` on the shelf. */
+  bookTotal?: number;
   page: number;
   pageSize: number;
 }

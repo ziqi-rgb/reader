@@ -646,10 +646,13 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
       absorbed.add(owner.id);
     }
     // The count is the union of everything the chip now stands for: most of those
-    // books are in both, so adding the numbers would double them.
+    // books are in both, so adding the numbers would double them. Both readings —
+    // books and slots — come from the same query, so a 丛书 counts once either way.
     for (const owner of manual) {
       if (!absorbed.has(owner.id) || !owner.folderIds?.length) continue;
-      owner.subtreeCount = ctx.shelf.countGroupFilter(user.id, [owner.id, ...owner.folderIds]);
+      const counted = ctx.shelf.countGroupFilter(user.id, [owner.id, ...owner.folderIds]);
+      owner.subtreeCount = counted.books;
+      owner.subtreeSlotCount = counted.slots;
     }
     const merged = [...manual, ...standalone].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     // 未分组 is always offered, last: after a default group or any filter is applied

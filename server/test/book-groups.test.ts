@@ -287,6 +287,96 @@ test('a manual group and the folder group of the same name become one chip', asy
 });
 
 /**
+ * 未分组 is "not filed anywhere" — a folder group is filing too.
+ *
+ * A book under 「故事/长篇」 used to appear in 未分组 as well as under its folder: the
+ * chip counted a book its own grid then refused to show, and one book sat in two
+ * sections at once. The count and the filter are asserted together because they
+ * are two halves of one answer (`GroupService.unfiled` and `groupCondition`).
+ */
+test('a book filed by its folder is not 未分组', async t => {
+  const h = await httpHarness();
+  t.after(() => h.close());
+  const owner = await h.register();
+  const books = [
+    { id: 'in-folder', relPath: '故事/长篇/in-folder.epub' },
+    { id: 'at-root', relPath: 'at-root.epub' },
+  ];
+  for (const [index, book] of books.entries()) {
+    h.db.run(`INSERT INTO books(id,content_hash,format,title,author,created_at,updated_at)
+              VALUES(?,?,'epub',?,'作者',1,1)`, book.id, 'h-' + book.id, book.id);
+    h.db.run('INSERT INTO book_files(id,book_id,rel_path,size,mtime_ms,first_seen,last_seen) VALUES(?,?,?,100,1,1,1)',
+      'f-' + book.id, book.id, book.relPath);
+    h.db.run('INSERT INTO user_books(user_id,book_id,added_at,hidden) VALUES(?,?,?,0)', owner.id, book.id, index);
+  }
+
+  const listed = (await h.app.inject({ method: 'GET', url: '/api/v1/groups', headers: auth(owner) })).json()
+    .groups as Array<{ id: string; subtreeCount: number }>;
+  assert.equal(listed.find(group => group.id === 'unfiled')?.subtreeCount, 1,
+    'only the book sitting at the library root is 未分组');
+
+  const ids = (body: { items: Array<{ id: string }> }) => body.items.map(book => book.id).sort();
+  const unfiled = await h.app.inject({ method: 'GET', url: '/api/v1/books?groups=unfiled', headers: auth(owner) });
+  assert.deepEqual(ids(unfiled.json()), ['at-root'], 'the chip opens exactly what it counted');
+
+  const folder = await h.app.inject({
+    method: 'GET', url: `/api/v1/books?groups=${encodeURIComponent('folder:故事/长篇')}`, headers: auth(owner),
+  });
+  assert.deepEqual(ids(folder.json()), ['in-folder'], 'and the folder section still holds its book');
+
+  // Filing it by hand moves it between the two answers, never into both.
+  const created = await h.app.inject({ method: 'POST', url: '/api/v1/groups', headers: auth(owner), payload: { name: '读过' } });
+  const groupId = created.json().group.id as string;
+  await h.app.inject({ method: 'PUT', url: '/api/v1/books/at-root/groups', headers: auth(owner), payload: { groupIds: [groupId] } });
+  const after = (await h.app.inject({ method: 'GET', url: '/api/v1/groups', headers: auth(owner) })).json()
+    .groups as Array<{ id: string; subtreeCount: number }>;
+  assert.equal(after.find(group => group.id === 'unfiled')?.subtreeCount, 0, 'nothing is left unfiled');
+});
+
+/**
+ * A shelf row whose file is gone is not a book, so it is not 未分组 either.
+ *
+ * The scanner flags a vanished file (`missing = 1`) instead of deleting the row, so
+ * `user_books` keeps naming books the grid refuses to draw. Counting those made the
+ * chip read 284 over an empty list: the number and the grid have to come from one
+ * definition of "a book on this shelf", or the chip lies about its own section.
+ */
+test('a shelf row with no readable file is counted nowhere', async t => {
+  const h = await httpHarness();
+  t.after(() => h.close());
+  const owner = await h.register();
+  const books = [
+    { id: 'readable', relPath: 'readable.epub', missing: 0 },
+    { id: 'gone', relPath: 'gone.epub', missing: 1 },
+  ];
+  for (const [index, book] of books.entries()) {
+    h.db.run(`INSERT INTO books(id,content_hash,format,title,author,created_at,updated_at)
+              VALUES(?,?,'epub',?,'作者',1,1)`, book.id, 'h-' + book.id, book.id);
+    h.db.run(`INSERT INTO book_files(id,book_id,rel_path,size,mtime_ms,first_seen,last_seen,missing)
+              VALUES(?,?,?,100,1,1,1,?)`, 'f-' + book.id, book.id, book.relPath, book.missing);
+    h.db.run('INSERT INTO user_books(user_id,book_id,added_at,hidden) VALUES(?,?,?,0)', owner.id, book.id, index);
+  }
+
+  const ids = (body: { items: Array<{ id: string }> }) => body.items.map(book => book.id).sort();
+  const listed = (await h.app.inject({ method: 'GET', url: '/api/v1/groups', headers: auth(owner) })).json()
+    .groups as Array<{ id: string; subtreeCount: number }>;
+  assert.equal(listed.find(group => group.id === 'unfiled')?.subtreeCount, 1,
+    'only the readable book counts');
+
+  const unfiled = await h.app.inject({ method: 'GET', url: '/api/v1/books?groups=unfiled', headers: auth(owner) });
+  assert.deepEqual(ids(unfiled.json()), ['readable'], 'the chip opens exactly what it counted');
+
+  // Filing the dead row by hand does not make a group claim it either.
+  const created = await h.app.inject({ method: 'POST', url: '/api/v1/groups', headers: auth(owner), payload: { name: '读过' } });
+  const groupId = created.json().group.id as string;
+  await h.app.inject({ method: 'PUT', url: '/api/v1/books/gone/groups', headers: auth(owner), payload: { groupIds: [groupId] } });
+  const after = (await h.app.inject({ method: 'GET', url: '/api/v1/groups', headers: auth(owner) })).json()
+    .groups as Array<{ id: string; subtreeCount: number }>;
+  assert.equal(after.find(group => group.id === groupId)?.subtreeCount, 0, 'a book with no file is in no section');
+  assert.equal(after.find(group => group.id === 'unfiled')?.subtreeCount, 1, 'and it does not reappear as 未分组');
+});
+
+/**
  * Each level answers its own question (篇幅, tag, tag 细分) and so gets its own
  * 或 / 与 / 非; the levels themselves are AND-ed.
  */
@@ -493,4 +583,112 @@ test('group routes: CRUD, per-book assignment, and the shelf filter round-trip',
   const afterRemoval = await h.app.inject({ method: 'GET', url: '/api/v1/books', headers: auth(owner) });
   assert.equal(afterRemoval.json().items.length, 1, 'the book stays on the shelf');
   assert.deepEqual(afterRemoval.json().items[0].groups, []);
+});
+
+/**
+ * A page of the shelf is a screenful of *cards*: a 丛书 is one slot.
+ *
+ * Paging by book is what made a shelf of 172 books show eleven cards on page one:
+ * the first sixty books were three 丛书 (35 + 13 + 4 volumes), so sixty rows became
+ * eleven slots and two thirds of the page was empty. A page of 60 now means sixty
+ * *slots*, and a 丛书's volumes travel together — the client's fold never has to
+ * guess, and one series can never be split across two pages.
+ *
+ * The library browser keeps paging by book: it is a folder listing, not a shelf.
+ */
+test('the shelf pages by slot, so a 丛书 cannot eat a whole page', async t => {
+  const h = await httpHarness();
+  t.after(() => h.close());
+  const owner = await h.register();
+  const books = [
+    { id: 'a1', title: 'A1', series: 'Alpha Saga' },
+    { id: 'a2', title: 'A2', series: 'Alpha Saga' },
+    { id: 'a3', title: 'A3', series: 'Alpha Saga' },
+    { id: 'y1', title: 'Yak' },
+    { id: 'z1', title: 'Zed' },
+  ];
+  for (const [index, book] of books.entries()) {
+    h.db.run(
+      `INSERT INTO books(id,content_hash,format,title,author,series,created_at,updated_at)
+       VALUES(?,?,'epub',?,'作者',?,1,1)`,
+      book.id, 'h-' + book.id, book.title, book.series ?? '',
+    );
+    h.db.run('INSERT INTO book_files(id,book_id,rel_path,size,mtime_ms,first_seen,last_seen) VALUES(?,?,?,100,1,1,1)',
+      'f-' + book.id, book.id, book.id + '.epub');
+    h.db.run('INSERT INTO user_books(user_id,book_id,added_at,hidden) VALUES(?,?,?,0)', owner.id, book.id, index);
+  }
+
+  const page = async (query: string) => {
+    const res = await h.app.inject({ method: 'GET', url: `/api/v1/books?${query}`, headers: auth(owner) });
+    assert.equal(res.statusCode, 200, res.body);
+    return res.json() as { items: Array<{ id: string }>; total: number; bookTotal?: number };
+  };
+
+  // By title: 「Alpha Saga」 (A1–A3, one slot) · Yak · Zed.
+  const first = await page('sort=title&order=asc&pageSize=2&page=1');
+  assert.equal(first.total, 3, 'three slots, not five books');
+  assert.equal(first.bookTotal, 5, 'and the reader still has five books');
+  assert.deepEqual(first.items.map(book => book.id), ['a1', 'a2', 'a3', 'y1'],
+    'the whole 丛书 comes with its slot');
+
+  const second = await page('sort=title&order=asc&pageSize=2&page=2');
+  assert.deepEqual(second.items.map(book => book.id), ['z1'], 'the next page starts after that slot');
+
+  // The library browser lists a folder, so it pages by book.
+  const library = await page('scope=library&sort=title&order=asc&pageSize=2&page=1');
+  assert.equal(library.total, 5);
+  assert.deepEqual(library.items.map(book => book.id), ['a1', 'a2'], 'no folding in the library scope');
+});
+
+/**
+ * A group's number is a card count, not a file count.
+ *
+ * 「轻小说 55」 over a grid of six cards is the same complaint as the empty page:
+ * the number describes something the reader cannot see. So every group carries both
+ * readings — `bookCount`/`subtreeCount` for files, `slotCount`/`subtreeSlotCount`
+ * for cards, one per 丛书 — and 书架 settings picks which one the chips draw
+ * (「丛书算一本」, on by default).
+ */
+test('a group reports both readings: books, and slots that count a 丛书 once', async t => {
+  const h = await httpHarness();
+  t.after(() => h.close());
+  const owner = await h.register();
+  const books = [
+    { id: 's1', title: 'A1', series: 'Alpha Saga' },
+    { id: 's2', title: 'A2', series: 'Alpha Saga' },
+    { id: 's3', title: 'A3', series: 'Alpha Saga' },
+    { id: 'loose', title: 'Zed' },
+    { id: 'u1', title: 'B1', series: 'Beta Saga' },
+    { id: 'u2', title: 'B2', series: 'Beta Saga' },
+  ];
+  for (const [index, book] of books.entries()) {
+    h.db.run(
+      `INSERT INTO books(id,content_hash,format,title,author,series,created_at,updated_at)
+       VALUES(?,?,'epub',?,'作者',?,1,1)`,
+      book.id, 'h-' + book.id, book.title, book.series ?? '',
+    );
+    h.db.run('INSERT INTO book_files(id,book_id,rel_path,size,mtime_ms,first_seen,last_seen) VALUES(?,?,?,100,1,1,1)',
+      'f-' + book.id, book.id, book.id + '.epub');
+    h.db.run('INSERT INTO user_books(user_id,book_id,added_at,hidden) VALUES(?,?,?,0)', owner.id, book.id, index);
+  }
+
+  const created = await h.app.inject({ method: 'POST', url: '/api/v1/groups', headers: auth(owner), payload: { name: '轻小说' } });
+  const groupId = created.json().group.id as string;
+  for (const bookId of ['s1', 's2', 's3', 'loose']) {
+    const res = await h.app.inject({ method: 'PUT', url: `/api/v1/books/${bookId}/groups`, headers: auth(owner), payload: { groupIds: [groupId] } });
+    assert.equal(res.statusCode, 200, res.body);
+  }
+
+  const listed = (await h.app.inject({ method: 'GET', url: '/api/v1/groups', headers: auth(owner) })).json()
+    .groups as Array<{ id: string; bookCount: number; slotCount: number; subtreeCount: number; subtreeSlotCount: number }>;
+  const filed = listed.find(group => group.id === groupId)!;
+  assert.equal(filed.bookCount, 4, 'four files');
+  assert.equal(filed.slotCount, 2, 'one 丛书 + one loose book');
+  assert.equal(filed.subtreeCount, 4);
+  assert.equal(filed.subtreeSlotCount, 2);
+
+  // 未分组 carries both too: two volumes of one 丛书 are one card.
+  const unfiled = listed.find(group => group.id === 'unfiled')!;
+  assert.equal(unfiled.bookCount, 2);
+  assert.equal(unfiled.slotCount, 1);
 });

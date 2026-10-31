@@ -20,14 +20,14 @@ export interface ShelfFilters {
   groupModes?: { 2: GroupMode; 3: GroupMode; 4: GroupMode };
 }
 
-export function shelfQuery(runtime: AppRuntime, page = 1, sort: 'recent' | 'added' | 'title' | 'author' = 'recent', search = '', filters: ShelfFilters = {}) {
+export function shelfQuery(runtime: AppRuntime, page = 1, sort: 'recent' | 'added' | 'title' | 'author' = 'recent', search = '', filters: ShelfFilters = {}, pageSize = 60) {
   const apiSort = sort === 'recent' ? 'updated' : sort;
   const groups = filters.groups ?? [];
   const modes = filters.groupModes ?? { 2: 'or', 3: 'or', 4: 'or' };
   return queryOptions({
-    queryKey: ['shelf', runtime.api.baseUrl, runtime.api.currentSession()?.user.id, page, sort, search, filters.status ?? '', groups.join(','), modes[2], modes[3], modes[4]],
+    queryKey: ['shelf', runtime.api.baseUrl, runtime.api.currentSession()?.user.id, page, sort, search, filters.status ?? '', groups.join(','), modes[2], modes[3], modes[4], pageSize],
     queryFn: ({ signal }) => runtime.api.listBooks({
-      scope: 'shelf', page, pageSize: 60, sort: apiSort, order: sort === 'title' || sort === 'author' ? 'asc' : 'desc', search: search.trim(),
+      scope: 'shelf', page, pageSize, sort: apiSort, order: sort === 'title' || sort === 'author' ? 'asc' : 'desc', search: search.trim(),
       ...(filters.status ? { status: filters.status } : {}),
       ...(groups.length > 0
         ? {
@@ -41,8 +41,8 @@ export function shelfQuery(runtime: AppRuntime, page = 1, sort: 'recent' | 'adde
   });
 }
 
-export function useShelf(page = 1, sort: 'recent' | 'added' | 'title' | 'author' = 'recent', search = '', filters: ShelfFilters = {}) {
-  return useQuery(shelfQuery(useRuntime(), page, sort, search, filters));
+export function useShelf(page = 1, sort: 'recent' | 'added' | 'title' | 'author' = 'recent', search = '', filters: ShelfFilters = {}, pageSize = 60) {
+  return useQuery(shelfQuery(useRuntime(), page, sort, search, filters, pageSize));
 }
 
 /**

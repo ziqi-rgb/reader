@@ -10,8 +10,11 @@ import { useRuntime } from '../../../app/providers/runtime-context.tsx';
 import { useSettingsStore } from '../../../shared/stores/settings.store.ts';
 import { useShelf, useBookGroups, type ShelfFilters } from '../queries/shelf.queries.ts';
 import { foldSeries } from '../series.ts';
-import { defaultGroup, groupFilterIds, groupFilterValue, isManualGroup, subGroupValuesOf, activeTopGroupOf, type GroupModes } from '../groups.ts';
+import { DEFAULT_APP_SETTINGS, shelfPageSizeOrDefault } from '../../../store/settings.ts';
+import { ShelfPageSizeChip } from '../components/page-size-picker.tsx';
+import { defaultGroup, countedGroup, countedSubtree, groupFilterIds, groupFilterValue, groupPathLabel, inheritedGroupsOf, isManualGroup, subGroupValuesOf, activeTopGroupOf, type GroupModes } from '../groups.ts';
 import { BookDetailSheet, type BookMetadataDraft } from '../components/BookDetailSheet.tsx';
+import { GroupPicker } from '../components/group-picker.tsx';
 import { GroupFilterBar, GroupFilterSheet } from '../components/group-filter.tsx';
 import { SHELF_SORTS, ShelfSettingsSheet } from '../../../ui/shelf-settings.tsx';
 import { IconButton, Callout } from '../../../ui/toolkit.tsx';
@@ -232,7 +235,14 @@ export function ShelfPage() {
   const filters: ShelfFilters = { ...(status ? { status } : {}), ...(groupIds.length > 0 ? { groups: groupIds, groupModes } : {}) };
   const filtered = !!(status || groupIds.length > 0);
   const groups = useBookGroups();
-  const query = useShelf(page, sort, queryText, filters);
+  /**
+   * How many cards a page holds.
+   *
+   * The URL wins over the saved setting so a link someone shares keeps its page
+   * size; anything unreadable falls back to 60, which is what the shelf always was.
+   */
+  const pageSize = shelfPageSizeOrDefault(params.get('pageSize') ?? settings.shelfPageSize);
+  const query = useShelf(page, sort, queryText, filters, pageSize);
   const pages = query.data ? Math.max(1, Math.ceil(query.data.total / query.data.pageSize)) : 1;
   const cards = useMemo(() => query.data?.items ?? [], [query.data]);
   // Same-series books (≥2) share one slot; `foldSeries` is shared with the home rail.
@@ -254,12 +264,15 @@ export function ShelfPage() {
   );
   useEffect(() => { void runtime.updateSettings({ shelfSort: sort }); }, [runtime, sort]);
   // Every navigation keeps what it does not change; a new filter or query starts at page 1.
-  const go = (next: { q?: string; sort?: typeof sort; page?: number; status?: ReadingState | null; groups?: string[] | null; groupModes?: GroupModes }) => {
+  const go = (next: { q?: string; sort?: typeof sort; page?: number; status?: ReadingState | null; groups?: string[] | null; groupModes?: GroupModes; pageSize?: number }) => {
     const q = next.q ?? queryText, nextStatus = next.status === undefined ? status : next.status ?? undefined;
     const nextGroups = next.groups === undefined ? groupIds : next.groups ?? [];
     const nextModes = next.groupModes ?? groupModes;
+    const nextPageSize = next.pageSize ?? pageSize;
     setParams({
       ...(q ? { q } : {}), sort: next.sort ?? sort, page: String(next.page ?? 1),
+      // 60 is the default, so a URL only names a page size the reader chose.
+      ...(nextPageSize !== DEFAULT_APP_SETTINGS.shelfPageSize ? { pageSize: String(nextPageSize) } : {}),
       ...(nextStatus ? { status: nextStatus } : {}),
       // 或 is the default for every level; anything else has to be said per level.
       ...(nextGroups.length > 0
@@ -310,13 +323,11 @@ export function ShelfPage() {
       return;
     }
     if (action === 'seriesDetail') {
-      // A 丛书 stack is filed as one set: every volume gets the same groups.
+      // A 丛书 stack is filed as one set: every volume gets the same groups, and
+      // what it starts from is what its volumes already sit in (see
+      // `inheritedGroupsOf`).
       setSeriesTarget(books);
-      // Start from the groups all volumes already share, so re-saving is a no-op.
-      // Folder groups are read-only, so they never become part of the selection.
-      const shared = (book.groups ?? []).filter(group => group.kind !== 'folder').map(group => group.id)
-        .filter(id => books.every(item => (item.groups ?? []).some(group => group.id === id)));
-      setSeriesTargetIds(shared);
+      setSeriesTargetIds(inheritedGroupsOf(books).manual);
       setSeriesTargetError('');
       return;
     }
@@ -429,8 +440,24 @@ export function ShelfPage() {
   /** The default group is applied once per mount (see the effect below). */
   const defaultApplied = useRef(false);
   const allGroups = groups.data ?? [];
+  /**
+   * The groups as the reader wants them counted.
+   *
+   * 「丛书算一本」 is on by default, so a chip says what the grid behind it shows: a
+   * group of 55 files that folds into six 丛书 reads 「6」, not 「55」. The server
+   * sends both numbers (`slotCount`/`subtreeSlotCount`), so flipping the switch is
+   * instant — nothing is re-fetched and the two readings can never disagree.
+   */
+  const seriesAsOne = settings.shelfCountSeriesAsOne;
+  const countedGroups = useMemo(() => (seriesAsOne
+    ? allGroups.map(group => ({
+      ...group,
+      bookCount: countedGroup(group, true),
+      subtreeCount: countedSubtree(group, true),
+    }))
+    : allGroups), [allGroups, seriesAsOne]);
   /** The reader's own groups: the derived kinds (folder, 未分组) are not choosable. */
-  const manualGroups = useMemo(() => allGroups.filter(isManualGroup), [allGroups]);
+  const manualGroups = useMemo(() => countedGroups.filter(isManualGroup), [countedGroups]);
   /**
    * The section the shelf is showing.
    *
@@ -438,12 +465,12 @@ export function ShelfPage() {
    * looked up from the path rather than assumed to be selected itself: that keeps
    * one top-level button pressed and decides which blocks the sheet offers.
    */
-  const activeLevel1 = useMemo(() => activeTopGroupOf(allGroups, groupIds), [groupIds, allGroups]);
+  const activeLevel1 = useMemo(() => activeTopGroupOf(countedGroups, groupIds), [groupIds, countedGroups]);
   /**
    * The 分组 chip's own filters (everything below the top level), as `groups`
    * values — one value per chip, because a merged chip is one condition.
    */
-  const subGroupFilters = useMemo(() => subGroupValuesOf(allGroups, groupIds), [groupIds, allGroups]);
+  const subGroupFilters = useMemo(() => subGroupValuesOf(countedGroups, groupIds), [groupIds, countedGroups]);
   /**
    * The default group: the shelf opens on it when the URL names no filter.
    *
@@ -550,7 +577,10 @@ export function ShelfPage() {
     } finally { setSeriesTargetBusy(false); }
   };
   const remove = async (book: Book | ContinueReadingItem) => { await runtime.api.browseBatchShelf({ bookIds: [book.id] }, 'remove'); await refreshShelf(); };
-  const subtitle = queryText ? (query.data?.total ? `「${queryText}」匹配 ${query.data.total} 本` : `没有匹配「${queryText}」的书`) : '收藏好书，随时接着读'; // count and sort live in the sticky toolbar below; saying them twice is noise
+  const totalBooks = query.data?.bookTotal ?? query.data?.total ?? 0;
+  /** The number the shelf reports: cards when a 丛书 counts as one, files otherwise. */
+  const shelfTotal = seriesAsOne ? (query.data?.total ?? 0) : totalBooks;
+  const subtitle = queryText ? (shelfTotal ? `「${queryText}」匹配 ${shelfTotal} 本` : `没有匹配「${queryText}」的书`) : '收藏好书，随时接着读'; // count and sort live in the sticky toolbar below; saying them twice is noise
   const densityLabel = settings.shelfDensity === 'compact' ? '紧凑' : settings.shelfDensity === 'comfortable' ? '宽松' : '适中';
   return <div ref={swipe} id="shelf-scroll" className="shelf shelf-screen">
     <header className="shelf-head">
@@ -577,7 +607,7 @@ export function ShelfPage() {
           {readingStates.map(state => <button key={state} type="button" className="chip" aria-pressed={status === state} onClick={() => go({ status: state })}>{readingLabels[state]}</button>)}
         </div>
         <GroupFilterBar
-          groups={allGroups}
+          groups={countedGroups}
           activeLevel1={activeLevel1}
           subFilterCount={subGroupFilters.length}
           subFilterLabel={subGroupFilters.map(filterLabel).join('、')}
@@ -587,7 +617,7 @@ export function ShelfPage() {
         />
       </div>
       <FloatingNotice message={actionError} error />
-      {(!query.isPending && (cards.length > 0 || queryText || filtered)) && <div className="shelf-toolbar"><span className="shelf-count muted">{queryText ? `找到 ${query.data?.total ?? 0} 本` : `共 ${query.data?.total ?? 0} 本`}</span><div className="shelf-sort" role="group" aria-label="排序方式">{SHELF_SORTS.map(option => <button key={option.value} type="button" className="chip" aria-pressed={option.value === sort} onClick={() => onSort(option.value)}>{option.label}</button>)}</div><button type="button" className="chip" aria-pressed={selectMode} onClick={() => { setSelectMode(v => !v); if (selectMode) setSelected(new Set()); }}>{selectMode ? '取消选择' : '批量标记'}</button></div>}
+      {(!query.isPending && (cards.length > 0 || queryText || filtered)) && <div className="shelf-toolbar"><span className="shelf-count muted">{queryText ? `找到 ${shelfTotal} 本` : `共 ${shelfTotal} 本`}</span><div className="shelf-sort" role="group" aria-label="排序方式">{SHELF_SORTS.map(option => <button key={option.value} type="button" className="chip" aria-pressed={option.value === sort} onClick={() => onSort(option.value)}>{option.label}</button>)}</div><button type="button" className="chip" aria-pressed={selectMode} onClick={() => { setSelectMode(v => !v); if (selectMode) setSelected(new Set()); }}>{selectMode ? '取消选择' : '批量标记'}</button><ShelfPageSizeChip value={pageSize} onChange={next => { void runtime.updateSettings({ shelfPageSize: next }); go({ pageSize: next }); }} /></div>}
       {query.isPending && <><FloatingNotice message="正在加载书架…" busy /><BookGridSkeleton density={settings.shelfDensity} /></>}
       {query.error && <Callout tone="error" title="书架加载失败">{query.error.message}</Callout>}
       {query.data && cards.length === 0 && filtered && !queryText && <div className="empty-state collection-empty"><BookOpen className="empty-glyph" aria-hidden="true" /><p>{status ? `还没有${readingLabels[status]}的书` : '这个分组里没有书'}</p><p className="muted">{status === 'want' ? '在书籍的“⋯”菜单里可以标记想读。' : '换一个分类，或查看全部书籍。'}</p><div className="empty-actions"><button type="button" className="button" onClick={clearFilters}>查看全部书籍</button></div></div>}
@@ -600,7 +630,7 @@ export function ShelfPage() {
     {opdsOpen && <OpdsAccess api={runtime.api} onSignedOut={() => { void runtime.api.signOut(); }} onClose={() => { setOpdsOpen(false); setSettingsOpen(true); }} />}
     {menuTarget && <DialogView dialog={{ kind: 'pick', title: menuTarget.length > 1 ? `${menuTarget[0].series || '丛书'}（${menuTarget.length} 册）` : `《${menuTarget[0].title || '未命名'}》`, options: menuOptions(menuTarget), resolve: (_value: string | null) => undefined } satisfies Dialog} destructive={menuTarget.length > 1 ? '' : '从书架拿掉'} onClose={answer => { const target = menuTarget; setMenuTarget(null); if (typeof answer === 'string' && answer) void act(target, answer as BookAction); }} />}
     {groupsOpen && <GroupFilterSheet
-      groups={allGroups}
+      groups={countedGroups}
       selected={groupIds}
       modes={groupModes}
       activeLevel1={activeLevel1}
@@ -632,22 +662,22 @@ export function ShelfPage() {
       <div className="sheet-form">
         {seriesTargetError && <Callout tone="error">{seriesTargetError}</Callout>}
         <div className="sheet-field">
-          <label>分组<span className="muted">（整组统一设置，可多选）</span></label>
-          {manualGroups.length === 0
-            ? <p className="sheet-text muted">还没有分组。</p>
-            : <div className="chip-row" role="group" aria-label="选择分组">
-              {manualGroups.map(group => <button key={group.id} type="button" className="chip"
-                aria-pressed={seriesTargetIds.includes(group.id)}
-                aria-label={`${group.name}，${group.bookCount} 本`}
-                disabled={seriesTargetBusy}
-                onClick={() => setSeriesTargetIds(current => (current.includes(group.id)
-                  ? current.filter(id => id !== group.id)
-                  : [...current, group.id]))}>
-                {group.name}
-              </button>)}
-            </div>}
+          <label>分组<span className="muted">（整组统一设置，可多选；选下级会连上级一起勾上）</span></label>
+          <GroupPicker groups={manualGroups} selected={seriesTargetIds} busy={seriesTargetBusy} onChange={setSeriesTargetIds} />
           <p className="sheet-text muted">保存后这 {seriesTarget.length} 册都会设成所选分组；原来各自的分组会被覆盖。</p>
         </div>
+        {(() => {
+          // Inherited, and read-only: a folder group describes the files, not the
+          // reader, so it can be shown and filtered but never written. It has to be
+          // shown here, or a 丛书 that is only auto-filed by its folders reads as
+          // 未分组 in this sheet while the shelf files it under that folder.
+          const { folders } = inheritedGroupsOf(seriesTarget);
+          if (folders.length === 0) return null;
+          return <div className="sheet-field">
+            <label>文件夹分组<span className="muted">（按各册所在目录自动生成，不可修改）</span></label>
+            <p className="sheet-text">{folders.map(group => groupPathLabel(group.name)).join('、')}</p>
+          </div>;
+        })()}
         <div className="sheet-field">
           <label>包含的册</label>
           <ul className="series-order">

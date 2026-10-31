@@ -81,8 +81,14 @@ export function groupCondition(
   let level = 0;
   for (const part of parts) {
     if (part === UNFILED_GROUP_ID) {
-      sqls.push(`NOT EXISTS (SELECT 1 FROM book_group_members gm JOIN book_groups g ON g.id = gm.group_id
-                            WHERE gm.book_id = ${bookId} AND g.user_id = ?)`);
+      // Both halves of "grouped": no manual group *and* no folder group. The two
+      // tests have to match `GroupService.unfiled()`'s count exactly — a chip that
+      // says 12 and opens 3 is the bug this predicate exists to prevent.
+      sqls.push(`(NOT EXISTS (SELECT 1 FROM book_group_members gm JOIN book_groups g ON g.id = gm.group_id
+                             WHERE gm.book_id = ${bookId} AND g.user_id = ?)
+                 AND NOT EXISTS (SELECT 1 FROM book_files f
+                                 WHERE f.book_id = ${bookId} AND f.missing = 0
+                                   AND instr(f.rel_path, '/') > 0))`);
       params.push(userId);
       level = level || 1;
       continue;

@@ -5,14 +5,17 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render } from '../src/shared/ui/render-root.ts';
 import { RuntimeContext } from '../src/app/providers/runtime-context.tsx';
+import { useSettingsStore } from '../src/shared/stores/settings.store.ts';
 
 /** 书架 (prototypes 2/19): 在读 / 想读 / 已读 and 分组 drive the query and the URL; ⋯ marks a book. */
 const shelfCalls: unknown[][] = [];
 const book = { id: 'b1', title: '夜航船', author: '示例作者', coverUrl: null, format: 'epub', readingState: 'reading' };
 /** What `useShelf` reports; a test can swap in a 丛书 stack. */
 let shelfItems: Array<Record<string, unknown>> = [book];
+/** Slots vs books: on the shelf a 丛书 is one slot, several books. */
+let shelfTotals = { total: 1, bookTotal: 1 };
 vi.mock('../src/features/shelf/queries/shelf.queries.ts', () => ({
-  useShelf: (...args: unknown[]) => { shelfCalls.push(args); return { data: { items: shelfItems, total: shelfItems.length, pageSize: 60 }, isPending: false, error: null }; },
+  useShelf: (...args: unknown[]) => { shelfCalls.push(args); return { data: { items: shelfItems, total: shelfTotals.total, bookTotal: shelfTotals.bookTotal, pageSize: 60 }, isPending: false, error: null }; },
   useBookGroups: () => ({
     data: [
       // 三体 also has a folder group of the same name: the server merges them, so the
@@ -45,7 +48,7 @@ const paint = (path: string) => act(() => render(
     </></QueryClientProvider>
   </RuntimeContext.Provider>, root));
 const click = (text: string) => act(() => [...root.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === text)!.click());
-afterEach(() => { act(() => render(null, root)); shelfCalls.length = 0; setReadingStatus.mockClear(); shelfItems = [book]; });
+afterEach(() => { act(() => render(null, root)); shelfCalls.length = 0; setReadingStatus.mockClear(); shelfItems = [book]; shelfTotals = { total: 1, bookTotal: 1 }; });
 
 it('filters by reading state and by groups, keeping both in the URL', async () => {
   paint('/shelf?status=want');
@@ -88,7 +91,7 @@ it('saves 书籍详情 through the metadata and group endpoints', async () => {
     title.dispatchEvent(new Event('input', { bubbles: true }));
   });
   // 分组 is one level at a time now: the ＋ on a 一级组 files the book into that 大类.
-  await act(() => root.querySelector<HTMLButtonElement>('[aria-label="把书放进「三体」"]')!.click());
+  await act(() => root.querySelector<HTMLButtonElement>('[aria-label="归入「三体」"]')!.click());
   // The save is async (two writes), so the click has to be awaited inside act.
   await act(async () => {
     [...root.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '保存')!.click();
@@ -109,7 +112,9 @@ it('opens 丛书详情 for a stack and files every volume into the chosen group'
   expect([...root.querySelectorAll('.sheet-list button')].map(button => button.textContent))
     .toEqual(['编辑整组丛书（2 册）', '丛书详情（2 册）', '取消丛书（整组）']);
   await click('丛书详情（2 册）');
-  await act(() => root.querySelector<HTMLButtonElement>('[aria-label="三体，1 本"]')!.click());
+  // The 丛书 detail uses the same picker as 书籍详情 (one tree, browsed by 大类),
+  // so filing the whole stack goes through the same ＋ on the 一级组.
+  await act(() => root.querySelector<HTMLButtonElement>('[aria-label="归入「三体」"]')!.click());
   await act(async () => {
     [...root.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '保存分组')!.click();
   });
@@ -131,4 +136,43 @@ it('shows a card\'s state and marks it from the context menu', async () => {
   await openMenu();
   await click('清除标记');
   expect(setReadingStatus).toHaveBeenLastCalledWith('b1', null);
+});
+
+it('asks for the page size the reader picked, and remembers it on this device', async () => {
+  const updateSettings = vi.fn(async () => undefined);
+  runtime.updateSettings = updateSettings;
+  paint('/shelf');
+  // 60 is the default, so the URL says nothing about it.
+  expect(shelfCalls.at(-1)?.[4]).toBe(60);
+  expect(root.textContent).toContain('每页 60');
+  expect(new URLSearchParams(location).get('pageSize')).toBeNull();
+
+  await act(() => root.querySelector<HTMLButtonElement>('[aria-label="每页 60 本，点按修改"]')!.click());
+  await click('30');
+  expect(shelfCalls.at(-1)?.[4], 'the query asks for 30 slots').toBe(30);
+  expect(Object.fromEntries(new URLSearchParams(location))).toMatchObject({ page: '1', pageSize: '30' });
+  // Per device, not per account: the choice goes to the device settings store.
+  expect(updateSettings).toHaveBeenCalledWith({ shelfPageSize: 30 });
+});
+
+it('lets a shared link set the page size, over the saved one', async () => {
+  // A link someone sends carries the page size it was built with; showing the
+  // recipient's saved 60 instead would open a page that is not the one promised.
+  paint('/shelf?pageSize=20');
+  expect(shelfCalls.at(-1)?.[4]).toBe(20);
+  expect(root.textContent).toContain('每页 20');
+});
+
+it('counts a 丛书 as one book by default, and files when that is turned off', async () => {
+  // Six slots behind 55 files: the number has to say what the grid shows, or the
+  // reader counts 55 covers and finds six (「丛书算一本」, 偏好 → 书架显示).
+  shelfTotals = { total: 6, bookTotal: 55 };
+  paint('/shelf');
+  expect(root.querySelector('.shelf-count')?.textContent).toBe('共 6 本');
+
+  act(() => useSettingsStore.setState(state => ({ settings: { ...state.settings, shelfCountSeriesAsOne: false } })));
+  expect(root.querySelector('.shelf-count')?.textContent).toBe('共 55 本');
+
+  // Back on, so the next test reads the default.
+  act(() => useSettingsStore.setState(state => ({ settings: { ...state.settings, shelfCountSeriesAsOne: true } })));
 });

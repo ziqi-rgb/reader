@@ -3,8 +3,11 @@ import {
   activeTopGroupOf,
   childGroupName,
   childLevelsOf,
+  countedGroup,
+  countedSubtree,
   defaultGroup,
   flattenGroupTree,
+  groupAncestors,
   groupBlocksUnder,
   groupChildren,
   groupDescendants,
@@ -12,13 +15,16 @@ import {
   groupFilterValue,
   groupLevel,
   groupLevelOf,
+  groupParentName,
   groupPathLabel,
   groupRootOf,
   groupShortName,
   groupTree,
+  inheritedGroupsOf,
   isInGroupSubtree,
   subGroupValuesOf,
   topLevelGroups,
+  withAncestors,
 } from '../src/features/shelf/groups.ts';
 import type { BookGroup } from '../src/api/types.ts';
 
@@ -155,5 +161,83 @@ describe('what a selection means', () => {
     expect(subGroupValuesOf(groups, ['n', 'n-f', 'n-f-s'])).toEqual(['n-f', 'n-f-s']);
     // A value with no group behind it (deleted, still in the URL) still counts.
     expect(subGroupValuesOf(groups, ['gone'])).toEqual(['gone']);
+  });
+});
+
+describe('what selecting a group implies', () => {
+  it('walks the path, so every level above a group comes with it', () => {
+    // 「小说.奇幻.剑与魔法」 is inside 「小说.奇幻」, which is inside 「小说」.
+    expect(groupAncestors(groups, 'n-f-s').map(group => group.id)).toEqual(['n-f', 'n']);
+    expect(groupAncestors(groups, 'n-f').map(group => group.id)).toEqual(['n']);
+    expect(groupAncestors(groups, 'n')).toEqual([]);
+    // 「小说家」 only *looks* like a child of 小说; the path is what counts.
+    expect(groupAncestors(groups, 'n2')).toEqual([]);
+  });
+
+  it('skips a level that was never created rather than inventing it', () => {
+    // 「小说.-.奇幻」 hangs off 「小说」: the placeholder is a level, not a group.
+    const skipped = [...groups, group('n-skip', '小说.-.奇幻', { parentId: 'n' })];
+    expect(groupParentName('小说.-.奇幻')).toBe('小说');
+    expect(groupParentName('小说.奇幻.剑与魔法')).toBe('小说.奇幻');
+    expect(groupParentName('小说')).toBeNull();
+    expect(groupAncestors(skipped, 'n-skip').map(entry => entry.id)).toEqual(['n']);
+  });
+
+  it('closes a whole selection upwards exactly once', () => {
+    expect(withAncestors(groups, ['n-f-s', 's']).sort()).toEqual(['n', 'n-f', 'n-f-s', 's']);
+    expect(withAncestors(groups, ['n']).sort()).toEqual(['n']);
+    expect(withAncestors(groups, ['gone'])).toEqual(['gone']);
+  });
+});
+
+describe('counting 丛书 as one', () => {
+  const stack = group('s1', '轻小说', { bookCount: 5, subtreeCount: 7, slotCount: 2, subtreeSlotCount: 3 });
+
+  it('picks the reading the reader asked for', () => {
+    expect(countedGroup(stack, true)).toBe(2);
+    expect(countedGroup(stack, false)).toBe(5);
+    expect(countedSubtree(stack, true)).toBe(3);
+    expect(countedSubtree(stack, false)).toBe(7);
+  });
+
+  it('falls back to the file count when the server sent no slot numbers', () => {
+    // An older server (or a cached response) has no `slotCount`; the chip must still
+    // show a number rather than 「undefined 本」.
+    const legacy = group('s2', '旧接口', { bookCount: 4, subtreeCount: 4 });
+    expect(countedGroup(legacy, true)).toBe(4);
+    expect(countedSubtree(legacy, true)).toBe(4);
+  });
+});
+
+describe('what a 丛书 inherits', () => {  /** One volume, with the groups the server sends on a book. */
+  const book = (id: string, refs: Array<{ id: string; name: string; kind?: 'manual' | 'folder' | 'unfiled' }>) => ({
+    id,
+    title: id,
+    groups: refs,
+  });
+
+  it('takes the union of its volumes, so one filing is not lost', () => {
+    // Intersecting the volumes used to open 丛书详情 with nothing selected, and
+    // saving that selection then wiped the groups the volumes had.
+    const inherited = inheritedGroupsOf([
+      book('v1', [
+        { id: 'a', name: '小说.奇幻', kind: 'manual' },
+        { id: 'folder:故事/奇幻', name: '故事.奇幻', kind: 'folder' },
+      ]),
+      book('v2', [{ id: 'b', name: '小说.恐怖', kind: 'manual' }]),
+    ]);
+    expect(inherited.manual.sort()).toEqual(['a', 'b']);
+    expect(inherited.folders.map(group => group.id)).toEqual(['folder:故事/奇幻']);
+  });
+
+  it('dedupes a folder every volume shares and ignores the unfiled pseudo-group', () => {
+    const folder = { id: 'folder:故事', name: '故事', kind: 'folder' as const };
+    const inherited = inheritedGroupsOf([
+      book('v1', [folder, { id: 'unfiled', name: '未分组', kind: 'unfiled' }]),
+      book('v2', [folder]),
+      book('v3', []),
+    ]);
+    expect(inherited.manual).toEqual([]);
+    expect(inherited.folders.map(group => group.id)).toEqual(['folder:故事']);
   });
 });

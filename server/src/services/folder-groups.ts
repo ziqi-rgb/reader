@@ -1,4 +1,4 @@
-import { FOLDER_GROUP_PREFIX, GROUP_PATH_SEPARATOR, type BookGroupRef } from './groups.ts';
+import { FOLDER_GROUP_PREFIX, GROUP_PATH_SEPARATOR, groupSlotKeySql, type BookGroupRef } from './groups.ts';
 import type { Db } from '../db/index.ts';
 
 /**
@@ -14,6 +14,10 @@ import type { Db } from '../db/index.ts';
  * reader's own groups go one level deeper, but a directory tree that deep is not a
  * classification), and a book is filed at the deepest of them; the ancestors exist
  * as sections, and selecting one already includes everything below it.
+ *
+ * These groups are read-only, but they are not second class: a book that lives in
+ * a folder is *filed*, so it is not counted as 未分组 (see `UNFILED_GROUP_ID`) and a
+ * 丛书 of such books inherits the folder rather than appearing unfiled.
  */
 export const MAX_FOLDER_LEVEL = 3;
 export { FOLDER_GROUP_PREFIX };
@@ -34,6 +38,9 @@ export interface FolderGroupSeed {
   bookCount: number;
   /** Books in this folder and every folder below it, de-duplicated. */
   subtreeCount: number;
+  /** The same two, counting a 丛书 once — the shelf's cards, not its files. */
+  slotCount: number;
+  subtreeSlotCount: number;
 }
 
 export function folderGroupId(dir: string): string {
@@ -91,14 +98,17 @@ export function folderGroupOf(relPath: string): { id: string; name: string } | n
  */
 export function folderGroups(db: Db, userId?: string): FolderGroupSeed[] {
   const files = userId
-    ? db.all<{ book_id: string; rel_path: string }>(
-      `SELECT f.book_id, f.rel_path FROM book_files f
+    ? db.all<{ book_id: string; rel_path: string; slot_key: string }>(
+      `SELECT f.book_id, f.rel_path, ${groupSlotKeySql('b')} AS slot_key FROM book_files f
         JOIN user_books ub ON ub.book_id = f.book_id AND ub.user_id = ? AND ub.hidden = 0
+        JOIN books b ON b.id = f.book_id
        WHERE f.missing = 0`,
       userId,
     )
-    : db.all<{ book_id: string; rel_path: string }>(
-      'SELECT book_id, rel_path FROM book_files WHERE missing = 0',
+    : db.all<{ book_id: string; rel_path: string; slot_key: string }>(
+      `SELECT f.book_id, f.rel_path, ${groupSlotKeySql('b')} AS slot_key FROM book_files f
+        JOIN books b ON b.id = f.book_id
+       WHERE f.missing = 0`,
     );
   interface Entry {
     id: string;
@@ -106,6 +116,7 @@ export function folderGroups(db: Db, userId?: string): FolderGroupSeed[] {
     level: number;
     parentId: string | null;
     books: Set<string>;
+    slots: Set<string>;
   }
   const entries = new Map<string, Entry>();
   for (const file of files) {
@@ -121,11 +132,15 @@ export function folderGroups(db: Db, userId?: string): FolderGroupSeed[] {
           level: depth,
           parentId: depth > 1 ? folderGroupId(dirs.slice(0, -1).join('/')) : null,
           books: new Set<string>(),
+          slots: new Set<string>(),
         };
         entries.set(id, entry);
       }
       // Only the deepest folder holds the book: its ancestors are sections of it.
-      if (depth === segments.length) entry.books.add(file.book_id);
+      if (depth === segments.length) {
+        entry.books.add(file.book_id);
+        entry.slots.add(file.slot_key);
+      }
     }
   }
   if (entries.size === 0) return [];
@@ -136,6 +151,7 @@ export function folderGroups(db: Db, userId?: string): FolderGroupSeed[] {
   const byName = new Map<string, Entry>();
   for (const entry of entries.values()) byName.set(entry.name, entry);
   const subtree = new Map<string, Set<string>>();
+  const subtreeSlots = new Map<string, Set<string>>();
   for (const entry of entries.values()) {
     const segments = entry.name.split(GROUP_PATH_SEPARATOR);
     for (let depth = 1; depth <= segments.length; depth += 1) {
@@ -144,6 +160,9 @@ export function folderGroups(db: Db, userId?: string): FolderGroupSeed[] {
       const books = subtree.get(ancestor.id) ?? new Set<string>();
       for (const bookId of entry.books) books.add(bookId);
       subtree.set(ancestor.id, books);
+      const slots = subtreeSlots.get(ancestor.id) ?? new Set<string>();
+      for (const slotKey of entry.slots) slots.add(slotKey);
+      subtreeSlots.set(ancestor.id, slots);
     }
   }
   return [...entries.values()].map((entry) => ({
@@ -153,6 +172,8 @@ export function folderGroups(db: Db, userId?: string): FolderGroupSeed[] {
     parentId: entry.parentId,
     bookCount: entry.books.size,
     subtreeCount: subtree.get(entry.id)?.size ?? entry.books.size,
+    slotCount: entry.slots.size,
+    subtreeSlotCount: subtreeSlots.get(entry.id)?.size ?? entry.slots.size,
   }));
 }
 

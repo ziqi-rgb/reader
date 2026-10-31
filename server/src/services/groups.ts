@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { badRequest, notFound } from '../lib/errors.ts';
 import type { Db } from '../db/index.ts';
+import { shelfScopeSql } from './shelf-scope.ts';
 
 /**
  * One group of the reader's own shelf structure.
@@ -26,14 +27,18 @@ export const GROUP_LEVEL_PLACEHOLDER = '-';
  */
 export const FOLDER_GROUP_PREFIX = 'folder:';
 /**
- * The pseudo-group that means "not filed into any of the reader's groups".
+ * The pseudo-group that means "not filed anywhere".
  *
  * It has to exist as a selectable thing: once the shelf opens on a default group
  * (or any filter is applied), a book that was never filed would otherwise be
  * unreachable — there is no chip that means "nothing".
  *
- * Folder groups do not count as filing: those describe where the file sits, not
- * what the reader decided, so a book only in 「故事.长篇」 is still 未分组 here.
+ * A folder group counts as filing. A book under 「故事/长篇」 is already grouped —
+ * the folder chip filters to it — so leaving it in 未分组 as well put the same book
+ * in two places at once *and* made that chip's number disagree with its own filter
+ * (it counted the book, the filter did not show it). 未分组 is therefore "no manual
+ * group and no folder group": the file sits at the library root and the reader has
+ * not filed it by hand either.
  */
 export const UNFILED_GROUP_ID = 'unfiled';
 export const UNFILED_GROUP_NAME = '未分组';
@@ -51,6 +56,17 @@ export interface BookGroup {
   bookCount: number;
   /** Books in this group and everything below it, de-duplicated. */
   subtreeCount: number;
+  /**
+   * The same two counts in **slots**: a 丛书 counts once, a loose book once.
+   *
+   * The shelf draws one card per slot, so a chip showing the book count says 「55」
+   * over a grid of six cards. Both numbers are sent, and the reader's 「丛书算一本」
+   * setting picks which one is drawn — that keeps the choice instant instead of a
+   * round trip, and it keeps one definition of "slot" (the same one
+   * `ShelfService.list` pages by) instead of two that can drift.
+   */
+  slotCount?: number;
+  subtreeSlotCount?: number;
   /** The group the shelf opens with when nothing else is filtered. At most one per account. */
   isDefault: boolean;
   /** `manual` for a stored group, `folder`/`unfiled` for the derived pseudo-groups. */
@@ -97,6 +113,23 @@ export function groupParentName(name: string): string | null {
 /** Is `name` the group `root` or one of its descendants? */
 export function isWithinGroup(name: string, root: string): boolean {
   return name === root || name.startsWith(root + GROUP_PATH_SEPARATOR);
+}
+
+/**
+ * SQL for the key a *slot* is counted by: a 丛书 counts once, a loose book once.
+ *
+ * `ShelfService.list` draws one card per slot, so every number the shelf shows has
+ * to be taken this way or the chip says 「55」 over a grid of six. The series a
+ * group is keyed by is the *effective* one — `metadata_overrides` wins, exactly as
+ * it does for the card's own title — because a 丛书 the reader renamed by hand is
+ * still one 丛书.
+ *
+ * `bookAlias` names the `books` row in the caller's query. Never user input.
+ */
+export function groupSlotKeySql(bookAlias: string): string {
+  return `COALESCE(NULLIF(COALESCE((SELECT o.value FROM metadata_overrides o
+                                    WHERE o.book_id = ${bookAlias}.id AND o.field = 'series'), ${bookAlias}.series), '')
+                 , 'book:' || ${bookAlias}.id)`;
 }
 
 /**
@@ -252,11 +285,15 @@ export class GroupService {
   }
 
   list(userId: string): BookGroup[] {
-    const rows = this.db.all<{ id: string; name: string; is_default: number; n: number }>(
+    const rows = this.db.all<{ id: string; name: string; is_default: number; n: number; slots: number }>(
       `SELECT g.id, g.name, g.is_default,
               (SELECT COUNT(*) FROM book_group_members m
                 JOIN user_books ub ON ub.book_id = m.book_id AND ub.user_id = g.user_id AND ub.hidden = 0
-                WHERE m.group_id = g.id) AS n
+                WHERE m.group_id = g.id AND ${shelfScopeSql('ub.book_id')}) AS n,
+              (SELECT COUNT(DISTINCT ${groupSlotKeySql('b')}) FROM book_group_members m
+                JOIN user_books ub ON ub.book_id = m.book_id AND ub.user_id = g.user_id AND ub.hidden = 0
+                JOIN books b ON b.id = m.book_id
+                WHERE m.group_id = g.id AND ${shelfScopeSql('ub.book_id')}) AS slots
        FROM book_groups g
        WHERE g.user_id = ?
        ORDER BY g.name COLLATE NOCASE ASC`,
@@ -269,25 +306,33 @@ export class GroupService {
      * group — would be a query storm behind a single panel. The membership rows of
      * one account are small (a book × the groups it sits in).
      */
-    const members = this.db.all<{ group_id: string; book_id: string }>(
-      `SELECT m.group_id, m.book_id FROM book_group_members m
+    const members = this.db.all<{ group_id: string; book_id: string; slot_key: string }>(
+      `SELECT m.group_id, m.book_id, ${groupSlotKeySql('b')} AS slot_key FROM book_group_members m
         JOIN book_groups g ON g.id = m.group_id
         JOIN user_books ub ON ub.book_id = m.book_id AND ub.user_id = g.user_id AND ub.hidden = 0
-       WHERE g.user_id = ?`,
+        JOIN books b ON b.id = m.book_id
+       WHERE g.user_id = ? AND ${shelfScopeSql('ub.book_id')}`,
       userId,
     );
     const booksOf = new Map<string, Set<string>>();
+    /** The same membership keyed by slot: a 丛书 contributes one key per group. */
+    const slotsOf = new Map<string, Set<string>>();
     for (const row of members) {
       const books = booksOf.get(row.group_id) ?? new Set<string>();
       books.add(row.book_id);
       booksOf.set(row.group_id, books);
+      const slots = slotsOf.get(row.group_id) ?? new Set<string>();
+      slots.add(row.slot_key);
+      slotsOf.set(row.group_id, slots);
     }
     const idByName = new Map(rows.map((row) => [row.name, row.id] as const));
     return rows.map((row) => {
       const subtree = new Set<string>();
+      const subtreeSlots = new Set<string>();
       for (const other of rows) {
         if (!isWithinGroup(other.name, row.name)) continue;
         for (const bookId of booksOf.get(other.id) ?? []) subtree.add(bookId);
+        for (const slotKey of slotsOf.get(other.id) ?? []) subtreeSlots.add(slotKey);
       }
       const parentName = groupParentName(row.name);
       return {
@@ -297,6 +342,8 @@ export class GroupService {
         parentId: parentName ? idByName.get(parentName) ?? null : null,
         bookCount: row.n,
         subtreeCount: subtree.size,
+        slotCount: row.slots,
+        subtreeSlotCount: subtreeSlots.size,
         isDefault: row.is_default === 1,
         kind: 'manual' as const,
       };
@@ -455,21 +502,36 @@ export class GroupService {
 
   /**
    * The 未分组 pseudo-group: the reader's shelf books that sit in none of their
-   * groups. Never stored — it is the absence of rows in `book_group_members`.
+   * groups *and* in none of the library's folders. Never stored.
+   *
+   * Both halves are required. The rows in `book_group_members` are what the reader
+   * decided, the file's folder is what the shelf derived, and a book in either of
+   * them is grouped — see `UNFILED_GROUP_ID`. The folder half has to be the same
+   * test the filter uses (`group-filter.ts`), or the chip's count and the grid it
+   * opens disagree.
    *
    * Always returned, even at zero: it is a filter, and a filter that comes and goes
    * with the data is a control that moves under the reader's finger.
    */
   unfiled(userId: string): BookGroup {
-    const row = this.db.get<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM user_books ub
+    const row = this.db.get<{ n: number; slots: number }>(
+      `SELECT COUNT(*) AS n,
+              COUNT(DISTINCT ${groupSlotKeySql('b')}) AS slots
+         FROM user_books ub
+         LEFT JOIN books b ON b.id = ub.book_id
         WHERE ub.user_id = ? AND ub.hidden = 0
+          AND ${shelfScopeSql('ub.book_id')}
           AND NOT EXISTS (
             SELECT 1 FROM book_group_members m JOIN book_groups g ON g.id = m.group_id
-             WHERE m.book_id = ub.book_id AND g.user_id = ub.user_id)`,
+             WHERE m.book_id = ub.book_id AND g.user_id = ub.user_id)
+          AND NOT EXISTS (
+            SELECT 1 FROM book_files f
+             WHERE f.book_id = ub.book_id AND f.missing = 0
+               AND instr(f.rel_path, '/') > 0)`,
       userId,
     );
     const count = row?.n ?? 0;
+    const slots = row?.slots ?? 0;
     return {
       id: UNFILED_GROUP_ID,
       name: UNFILED_GROUP_NAME,
@@ -477,6 +539,8 @@ export class GroupService {
       parentId: null,
       bookCount: count,
       subtreeCount: count,
+      slotCount: slots,
+      subtreeSlotCount: slots,
       isDefault: false,
       kind: 'unfiled',
     };

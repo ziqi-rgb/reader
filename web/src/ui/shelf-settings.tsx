@@ -87,6 +87,12 @@ export function ShelfSettingsSheet({
         checked={settings.shelfShowProgress}
         onChange={(checked) => onPatch({ shelfShowProgress: checked })}
       />
+      <SwitchRow
+        label="丛书算一本"
+        hint="书架和分组上的数量按卡片数计：一部 35 册的丛书算 1 本"
+        checked={settings.shelfCountSeriesAsOne}
+        onChange={(checked) => onPatch({ shelfCountSeriesAsOne: checked })}
+      />
 
       <SectionTitle>默认排序</SectionTitle>
       <div className="notice">书架上的排序按钮会记住最后一次选择，这里设置的是首次打开时的默认值</div>

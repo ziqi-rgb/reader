@@ -1,4 +1,4 @@
-import type { BookGroup, GroupMode } from '../../api/types.ts';
+import type { Book, BookGroup, BookGroupRef, GroupMode } from '../../api/types.ts';
 
 /** One 或 / 与 / 非 per level: 二级 (篇幅), 三级 (tag), 四级 (tag 细分). */
 export interface GroupModes { 2: GroupMode; 3: GroupMode; 4: GroupMode }
@@ -55,8 +55,108 @@ export function isManualGroup(group: Pick<BookGroup, 'kind'>): boolean {
   return group.kind !== 'folder' && group.kind !== 'unfiled';
 }
 
-/** The name a child gets when it is created *under* a group: the parent's path plus one step. */
-export function childGroupName(parentName: string, child: string): string {
+/**
+ * The groups a 丛书 inherits from its volumes.
+ *
+ * A 丛书 is not a row: it is a stack of books sharing a `series`, so what it sits
+ * in is what its volumes sit in. The *union*, not the intersection — a stack whose
+ * volumes were filed differently still belongs to every section any of them
+ * belongs to, while an intersection opened the sheet with nothing selected and
+ * saving that empty selection wiped the groups the volumes had.
+ *
+ * `manual` is the writable selection (the reader's own groups, which a 丛书 detail
+ * writes to every volume). `folders` are the folder groups the stack inherits from
+ * the filesystem: shown and filtered, never written, because they describe where
+ * the files are rather than what the reader decided.
+ */
+export function inheritedGroupsOf(books: readonly Pick<Book, 'groups'>[]): {
+  manual: string[];
+  folders: BookGroupRef[];
+} {
+  const manual = new Set<string>();
+  const folders = new Map<string, BookGroupRef>();
+  for (const book of books) {
+    for (const group of book.groups ?? []) {
+      if (group.kind === 'folder') folders.set(group.id, group);
+      else if (group.kind !== 'unfiled') manual.add(group.id);
+    }
+  }
+  return { manual: [...manual], folders: [...folders.values()] };
+}
+
+/**
+ * The group one level up, skipping a skipped level.
+ *
+ * 「小说.奇幻.剑与魔法」 → 「小说.奇幻」, and 「小说.-.奇幻」 → 「小说」: the placeholder
+ * is a level, not a group. Mirrors `groupParentName` in
+ * `server/src/services/groups.ts` — the server owns the stored tree, but the
+ * picker has to walk the same path to know which ancestors a selection implies,
+ * and the two must not disagree about what 「-」 means.
+ */
+export function groupParentName(name: string): string | null {
+  const segments = groupSegments(name);
+  let depth = segments.length - 1;
+  while (depth > 0 && segments[depth - 1] === GROUP_LEVEL_PLACEHOLDER) depth -= 1;
+  return depth > 0 ? segments.slice(0, depth).join(GROUP_PATH_SEPARATOR) : null;
+}
+
+/**
+ * The groups above `id`, nearest first.
+ *
+ * Choosing a 四级 tag means the book is in that tag *and* in the 篇幅 and 大类 it
+ * hangs off: 「在 小说.奇幻.剑与魔法 里」 is not something a shelf can hold without
+ * the book also being in 小说. A stored set that named only the leaf still filters
+ * correctly (the server expands a selection down its subtree), but it would say
+ * something different from what the picker shows, and clearing a 大类 afterwards
+ * would leave the leaf silently behind.
+ */
+export function groupAncestors(groups: readonly BookGroup[], id: string): BookGroup[] {
+  const out: BookGroup[] = [];
+  const seen = new Set<string>([id]);
+  let current = groups.find(group => group.id === id)?.name;
+  while (current) {
+    const parentName = groupParentName(current);
+    if (!parentName || seen.has(parentName.toLowerCase())) break;
+    seen.add(parentName.toLowerCase());
+    const parent = groups.find(group => group.name.toLowerCase() === parentName.toLowerCase());
+    if (!parent) break;
+    out.push(parent);
+    current = parent.name;
+  }
+  return out;
+}
+
+/**
+ * `ids` closed upwards: every group a selection implies by sitting under it.
+ *
+ * The set a picker shows and the set it saves have to be the same one, so this is
+ * the single definition of "and its ancestors" — used when a chip is ticked and
+ * when an existing selection is read back (an older membership may name only a
+ * 四级 tag).
+ */
+export function withAncestors(groups: readonly BookGroup[], ids: readonly string[]): string[] {
+  const out = new Set(ids);
+  for (const id of ids) for (const ancestor of groupAncestors(groups, id)) out.add(ancestor.id);
+  return [...out];
+}
+
+/**
+ * The group's own count as the reader wants it: cards when 「丛书算一本」 is on,
+ * files otherwise.
+ *
+ * Both numbers come from the server (see `BookGroup.slotCount`), so the switch is
+ * instant and there is exactly one definition of a slot — the one the shelf pages by.
+ */
+export function countedGroup(group: BookGroup, seriesAsOne: boolean): number {
+  return seriesAsOne ? group.slotCount ?? group.bookCount : group.bookCount;
+}
+
+/** The same choice for "everything below this group". */
+export function countedSubtree(group: BookGroup, seriesAsOne: boolean): number {
+  return seriesAsOne ? group.subtreeSlotCount ?? group.subtreeCount : group.subtreeCount;
+}
+
+/** The name a child gets when it is created *under* a group: the parent's path plus one step. */export function childGroupName(parentName: string, child: string): string {
   return `${parentName}${GROUP_PATH_SEPARATOR}${child.trim()}`;
 }
 

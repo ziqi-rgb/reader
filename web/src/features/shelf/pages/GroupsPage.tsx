@@ -8,7 +8,8 @@ import { Sheet } from '../../../ui/sheet.tsx';
 import { useRuntime } from '../../../app/providers/runtime-context.tsx';
 import { useBookGroups } from '../queries/shelf.queries.ts';
 import type { BookGroup } from '../../../api/types.ts';
-import { childLevelsOf, flattenGroupTree, groupChildren, groupDescendants, groupPathLabel, groupShortName, groupTree, isManualGroup } from '../groups.ts';
+import { childLevelsOf, countedGroup, countedSubtree, flattenGroupTree, groupChildren, groupDescendants, groupPathLabel, groupShortName, groupTree, isManualGroup } from '../groups.ts';
+import { useSettingsStore } from '../../../shared/stores/settings.store.ts';
 import '../styles/groups.css';
 
 /** What each level means to the reader, used in the create sheet and the pickers. */
@@ -33,6 +34,7 @@ export function GroupsPage() {
   const runtime = useRuntime();
   const queryClient = useQueryClient();
   const groups = useBookGroups();
+  const seriesAsOne = useSettingsStore(state => state.settings.shelfCountSeriesAsOne);
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -50,7 +52,14 @@ export function GroupsPage() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [helpPinned, setHelpPinned] = useState(false);
 
-  const all = useMemo(() => (groups.data ?? []).filter(isManualGroup), [groups.data]);
+  const all = useMemo(() => (groups.data ?? [])
+    // Counted the way the shelf counts: a 丛书 is one card, unless the reader turned
+    // that off (「丛书算一本」).
+    .filter(isManualGroup)
+    .map(group => (seriesAsOne
+      ? { ...group, bookCount: countedGroup(group, true), subtreeCount: countedSubtree(group, true) }
+      : group)),
+  [groups.data, seriesAsOne]);
   const rows = useMemo(
     () => flattenGroupTree(groupTree(all), id => collapsed.has(id)),
     [all, collapsed],

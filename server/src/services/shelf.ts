@@ -1,8 +1,9 @@
 import type { Db } from '../db/index.ts';
 import { applyOverrides, type BaseMetadata } from './merge.ts';
-import { groupsOfBooks, type BookGroupRef } from './groups.ts';
+import { groupSlotKeySql, groupsOfBooks, type BookGroupRef } from './groups.ts';
 import { folderGroupsOfBooks } from './folder-groups.ts';
 import { escapeLike, groupCondition, groupFilterConditions } from './group-filter.ts';
+import { shelfScopeSql } from './shelf-scope.ts';
 import { safeJsonParse } from '../lib/text.ts';
 import { badRequest, notFound } from '../lib/errors.ts';
 
@@ -205,7 +206,22 @@ export interface ListOptions {
 export class ShelfService {
   constructor(private readonly db: Db) {}
 
-  list(userId: string, options: ListOptions = {}): { items: BookDto[]; total: number; page: number; pageSize: number } {
+  /**
+   * One page of the shelf or of the library.
+   *
+   * `total` is the number of **slots** (a book, or a whole 丛书) and `bookTotal` the
+   * number of books behind them. They differ only on the shelf, where a page is a
+   * screenful of cards: the pager counts slots, the "共 N 本" line counts books, and
+   * using one number for both would either lie about the page count or about the
+   * library.
+   */
+  list(userId: string, options: ListOptions = {}): {
+    items: BookDto[];
+    total: number;
+    bookTotal: number;
+    page: number;
+    pageSize: number;
+  } {
     const page = Math.max(1, options.page ?? 1);
     const pageSize = Math.min(200, Math.max(1, options.pageSize ?? 50));
     /**
@@ -244,9 +260,7 @@ export class ShelfService {
     const library = scope === 'library';
     const where: string[] = library
       ? ['EXISTS (SELECT 1 FROM book_files f WHERE f.book_id = b.id AND f.missing = 0)']
-      : ['ub.user_id = ?', 'ub.hidden = 0', `(EXISTS (SELECT 1 FROM book_files f WHERE f.book_id = b.id AND f.missing = 0)
-          OR EXISTS (SELECT 1 FROM acquired_files a WHERE a.book_id = b.id)
-          OR EXISTS (SELECT 1 FROM chapter_publications c WHERE c.book_id = b.id AND c.user_id = ub.user_id))`];
+      : ['ub.user_id = ?', 'ub.hidden = 0', shelfScopeSql('b.id')];
     const params: Array<string | number> = library ? [] : [userId];
     if (options.fileFormats) {
       where.push(`b.format IN (${options.fileFormats.map(() => '?').join(',') || 'NULL'})`);
@@ -349,23 +363,88 @@ export class ShelfService {
       ? ', ub.hidden AS shelf_hidden'
       : `, (${READING_STATE}) AS reading_state, rp.updated_at AS last_read_at, rp.percentage AS percent`;
 
-    const totalRow = this.db.get<{ n: number }>(
+    /*
+     * 书架按**格子**分页，书库按**书**分页。
+     *
+     * A page is what the reader can see, and on the shelf one card is one thing: a
+     * 丛书 of 35 volumes is still one slot. Paging by book made a page of 60 show
+     * eleven cards when the first sixty books happened to be three 丛书 — the reader
+     * asked for a shelf and got a corner of one.
+     *
+     * So the entry is the unit: a book, or every matching volume of one 丛书 (same
+     * effective `series`, which `metadata_overrides` can change). An entry sits where
+     * its *first* book sits in the sort — the same place the client's own fold would
+     * have put it — and all of its books come back together, so the fold has nothing
+     * to guess at and never splits a 丛书 across two pages.
+     */
+    const seriesKey = `COALESCE(NULLIF(${effectiveField('series')}, ''), 'book:' || b.id)`;
+    const orderTerm = `${orderColumn} ${order}, b.title ASC`;
+
+    const bookCount = this.db.get<{ n: number }>(
       `SELECT COUNT(*) AS n FROM books b ${join} WHERE ${whereSql}`,
       ...joinParams, ...params,
-    );
+    )?.n ?? 0;
 
-    const rows = this.db.all<BookRow>(
-      `SELECT ${BOOK_COLUMNS.split(',').map((c) => `b.${c.trim()}`).join(', ')}, ub.added_at${shelfColumn}
-       FROM books b ${join}
-       WHERE ${whereSql}
-       ORDER BY ${orderColumn} ${order}, b.title ASC
+    if (library) {
+      const rows = this.db.all<BookRow>(
+        `SELECT ${BOOK_COLUMNS.split(',').map((c) => `b.${c.trim()}`).join(', ')}, ub.added_at${shelfColumn}
+         FROM books b ${join}
+         WHERE ${whereSql}
+         ORDER BY ${orderTerm}
+         LIMIT ? OFFSET ?`,
+        ...joinParams, ...params, pageSize, (page - 1) * pageSize,
+      );
+      const items = rows.map((row) => this.toDto(row));
+      this.attachGroups(userId, items);
+      return { items, total: bookCount, bookTotal: bookCount, page, pageSize };
+    }
+
+    // One row per slot, in the reader's order: the entry's own sort value is the
+    // first of its books, which is what keeps a 丛书 at its top volume's place.
+    const entries = this.db.all<{ entry: string }>(
+      `WITH matched AS (
+         SELECT ${seriesKey} AS entry, ${orderColumn} AS sort_value, b.title AS title
+         FROM books b ${join}
+         WHERE ${whereSql}
+       ), ranked AS (
+         SELECT entry, sort_value, title,
+                ROW_NUMBER() OVER (PARTITION BY entry ORDER BY sort_value ${order}, title ASC) AS rn
+         FROM matched
+       )
+       SELECT entry FROM ranked WHERE rn = 1
+       ORDER BY sort_value ${order}, title ASC
        LIMIT ? OFFSET ?`,
       ...joinParams, ...params, pageSize, (page - 1) * pageSize,
-    );
+    ).map((row) => row.entry);
 
-    const items = rows.map((row) => this.toDto(row));
+    const total = this.db.get<{ n: number }>(
+      `WITH matched AS (
+         SELECT ${seriesKey} AS entry FROM books b ${join} WHERE ${whereSql}
+       )
+       SELECT COUNT(*) AS n FROM (SELECT entry FROM matched GROUP BY entry)`,
+      ...joinParams, ...params,
+    )?.n ?? 0;
+
+    if (entries.length === 0) return { items: [], total, bookTotal: bookCount, page, pageSize };
+
+    const rows = this.db.all<BookRow & { entry_key: string }>(
+      `SELECT ${BOOK_COLUMNS.split(',').map((c) => `b.${c.trim()}`).join(', ')}, ub.added_at${shelfColumn}, ${seriesKey} AS entry_key
+       FROM books b ${join}
+       WHERE ${whereSql} AND ${seriesKey} IN (${entries.map(() => '?').join(',')})
+       ORDER BY ${orderTerm}`,
+      ...joinParams, ...params, ...entries,
+    );
+    // The slot order above is the order the client draws; the volumes inside a slot
+    // keep the reader's sort so 「第 1 册」 is first.
+    const byEntry = new Map<string, BookRow[]>();
+    for (const row of rows) {
+      const list = byEntry.get(row.entry_key) ?? [];
+      list.push(row);
+      byEntry.set(row.entry_key, list);
+    }
+    const items = entries.flatMap((entry) => byEntry.get(entry) ?? []).map((row) => this.toDto(row));
     this.attachGroups(userId, items);
-    return { items, total: totalRow?.n ?? 0, page, pageSize };
+    return { items, total, bookTotal: bookCount, page, pageSize };
   }
 
   get(userId: string, bookId: string): BookDto {
@@ -431,12 +510,17 @@ export class ShelfService {
   }
 
   /**
-   * How many shelf books a filter value stands for.
+   * How many shelf books a filter value stands for — and how many *slots*.
    *
    * The merged chip reports a union: a book filed by hand in 「R18」 that also
-   * lives in the 「R18」 folder is one book, not two.
+   * lives in the 「R18」 folder is one book, not two. `slots` counts that union the
+   * way the shelf draws it, one per 丛书.
+   *
+   * The count is taken in the *shelf scope* (`shelfScopeSql`) — the same books the
+   * grid behind the chip can show. A `user_books` row whose file was flagged missing
+   * is not one of them, and counting it made a chip say 284 over an empty list.
    */
-  countGroupFilter(userId: string, values: readonly string[]): number {
+  countGroupFilter(userId: string, values: readonly string[]): { books: number; slots: number } {
     const owned = this.db.all<{ id: string; name: string }>(
       'SELECT id, name FROM book_groups WHERE user_id = ?', userId,
     );
@@ -448,13 +532,16 @@ export class ShelfService {
       conditions.push(condition.sql);
       params.push(...condition.params);
     }
-    if (conditions.length === 0) return 0;
-    const row = this.db.get<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM user_books ub
-        WHERE ub.user_id = ? AND ub.hidden = 0 AND (${conditions.join(' OR ')})`,
+    if (conditions.length === 0) return { books: 0, slots: 0 };
+    const row = this.db.get<{ books: number; slots: number }>(
+      `SELECT COUNT(*) AS books, COUNT(DISTINCT ${groupSlotKeySql('b')}) AS slots
+         FROM user_books ub
+         JOIN books b ON b.id = ub.book_id
+        WHERE ub.user_id = ? AND ub.hidden = 0 AND ${shelfScopeSql('ub.book_id')}
+          AND (${conditions.join(' OR ')})`,
       userId, ...params,
     );
-    return row?.n ?? 0;
+    return { books: row?.books ?? 0, slots: row?.slots ?? 0 };
   }
 
   /**

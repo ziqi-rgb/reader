@@ -198,7 +198,7 @@ export function GroupFilterSheet({
         先在筛选行展开一级组（左侧的箭头）并选一个，这里就会列出它的二级、三级、四级分组。
       </p>}
       {activeLevel1?.kind === 'unfiled' && <p className="sheet-text muted">
-        「{activeLevel1.name}」= 还没有放进任何分组的书。它没有下级分组，选它再点「应用」就能把这些书单独挑出来。
+        「{activeLevel1.name}」= 既没有手动分组、所在目录也不是一个分组（即放在书库根目录）的书。它没有下级分组，选它再点「应用」就能把这些书单独挑出来。
       </p>}
       {activeLevel1 && activeLevel1.kind !== 'unfiled' && <>
         <div className="sheet-field">

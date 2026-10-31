@@ -30,6 +30,23 @@ export type ShelfDensity = 'compact' | 'cozy' | 'comfortable';
  */
 export type ShelfSort = 'recent' | 'added' | 'title' | 'author';
 
+/**
+ * The fixed steps the shelf's 「每页 N」 menu offers.
+ *
+ * 60 is the default and stays in the list: it is what the shelf has always shown,
+ * so a reader who never opens the menu sees no change.
+ */
+export const SHELF_PAGE_SIZES = [10, 20, 30, 60, 100] as const;
+/** The server refuses more than this (`ShelfService.list` clamps at 200). */
+export const SHELF_PAGE_SIZE_MAX = 200;
+
+/** A page size that is safe to ask for: an integer in 1..200, or the default. */
+export function shelfPageSizeOrDefault(value: unknown): number {
+  const size = Math.round(Number(value));
+  if (!Number.isFinite(size) || size < 1) return DEFAULT_APP_SETTINGS.shelfPageSize;
+  return Math.min(SHELF_PAGE_SIZE_MAX, size);
+}
+
 export type ReadoutMode = 'none' | 'book' | 'chapter' | 'progress' | 'time';
 export const READOUT_FIELDS = [
   { key: 'readoutTopLeft', label: '顶部左侧' },
@@ -92,10 +109,27 @@ export interface AppSettings extends ViewSettings {
   shelfDensity: ShelfDensity;
   /** What the shelf sorts by when the reader has not picked this session. */
   shelfSort: ShelfSort;
+  /**
+   * How many slots one shelf page holds.
+   *
+   * A slot is one card — a book, or a whole 丛书 — so this is also how much of the
+   * shelf a page shows. Per device like the density: a phone and a monitor want
+   * different numbers, and the shelf editor offers the fixed steps plus a typed one.
+   */
+  shelfPageSize: number;
   /** Show the author under each cover. Off makes the grid much quieter. */
   shelfShowAuthor: boolean;
   /** Show the progress bar under a cover that has been started. */
   shelfShowProgress: boolean;
+  /**
+   * Count a 丛书 as one book in every number the shelf shows.
+   *
+   * On by default, because the numbers have to describe what the reader can see: a
+   * chip reading 「轻小说 55」 that opens six cards is the same complaint as a page
+   * that looks empty. Off counts files, which is what an OPDS catalogue or an
+   * export would say.
+   */
+  shelfCountSeriesAsOne: boolean;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -129,8 +163,10 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   ttsEngine: 'auto',
   shelfDensity: 'cozy',
   shelfSort: 'recent',
+  shelfPageSize: 60,
   shelfShowAuthor: true,
   shelfShowProgress: true,
+  shelfCountSeriesAsOne: true,
 };
 
 export class SettingsStore {
@@ -178,6 +214,7 @@ export class SettingsStore {
         if (!['recent', 'added', 'title', 'author'].includes(this.settings.shelfSort)) {
           this.settings.shelfSort = DEFAULT_APP_SETTINGS.shelfSort;
         }
+        this.settings.shelfPageSize = shelfPageSizeOrDefault(this.settings.shelfPageSize);
       } catch {
         this.settings = { ...DEFAULT_APP_SETTINGS };
       }
