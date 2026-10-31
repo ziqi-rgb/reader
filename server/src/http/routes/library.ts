@@ -4,6 +4,7 @@ import { authenticate, currentUser, requireAdmin } from '../auth.ts';
 import { badRequest, notFound } from '../../lib/errors.ts';
 import { parseConflictPolicy, type ConflictPolicy, type StagedUpload } from '../../services/uploads.ts';
 import { assertSafeRel, normalizeRel, resolveInside } from '../../lib/paths.ts';
+import { UserChapterCache } from '../../services/user-cache.ts';
 import { createHash } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
 import { join, extname } from 'node:path';
@@ -20,6 +21,8 @@ import { withSignal } from '../request-signal.ts';
 import { searchBookPage } from '../../services/book-search.ts';
 import { ReadingOverrideService } from '../../services/reading-overrides.ts';
 import { GroupService } from '../../services/groups.ts';
+import { groupFilterFromQuery } from '../../services/group-filter.ts';
+import { folderGroups } from '../../services/folder-groups.ts';
 import { READING_STATES, type ReadingState } from '../../services/shelf.ts';
 
 /**
@@ -125,6 +128,18 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
     return ctx.shelf.facets(user.id);
   });
 
+  /**
+   * Which books have chapters on this server, for the shelf's per-card badge.
+   *
+   * One request for the whole shelf rather than one per card: the badge answers
+   * "did I download this to the NAS", and asking per book would make a 300-book
+   * shelf 300 requests on every paint. Books with nothing cached are simply absent.
+   */
+  app.get('/api/v1/library/chapter-cache', { preHandler: auth }, async (request) => {
+    const user = currentUser(request);
+    return { books: await new UserChapterCache(ctx.config.dataDir).summary(user.id) };
+  });
+
   app.get('/api/v1/books', { preHandler: auth }, async (request) => {
     const user = currentUser(request);
     const q = request.query as Record<string, string | undefined>;
@@ -133,12 +148,10 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
       ...(q.author !== undefined ? { author: q.author } : {}),
       ...(q.series !== undefined ? { series: q.series } : {}),
       ...(q.tag !== undefined ? { tag: q.tag } : {}),
-      // Reader-owned groups: comma-separated ids, combined by `groupMode`
-      // (or / and / not). The shelf's only grouping dimension.
-      ...(q.groups !== undefined
-        ? { groups: q.groups.split(',').map((value) => value.trim()).filter(Boolean) }
-        : {}),
-      ...(q.groupMode !== undefined ? { groupMode: q.groupMode as 'or' | 'and' | 'not' } : {}),
+      // Reader-owned groups: comma-separated ids, combined per level by
+      // `groupMode2` / `groupMode3` / `groupMode4` (or / and / not); the levels are
+      // AND-ed, and `groupMode` is the one-mode form older clients still send.
+      ...groupFilterFromQuery(q),
       ...(q.format !== undefined ? { format: q.format } : {}),
       ...(q.path !== undefined ? { path: q.path } : {}),
       // `scope=library` is the *index* rather than the reader's shelf: every book in
@@ -591,12 +604,71 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
    * the shelf's 或 / 与 / 非 filter meaningful.
    */
   app.get('/api/v1/groups', { preHandler: auth }, async (request) => {
-    return { groups: groups().list(currentUser(request).id) };
+    const user = currentUser(request);
+    const manual = groups().list(user.id);
+    /*
+     * Folder groups are derived, not stored (see `folder-groups.ts`): a book's
+     * folders are its groups, so the shelf and the library offer the same 筛选
+     * without a per-account copy of the filesystem. They are read-only, and they
+     * cannot be the shelf's default, so `isDefault` is always false here.
+     */
+    const folders = folderGroups(ctx.db, user.id).map((group) => ({ ...group, isDefault: false, kind: 'folder' as const }));
+    /*
+     * A folder group merges into the manual group it *means*, not just the one with
+     * the identical name: the folder 「故事/长篇/喜剧」 carries the 篇幅 it happened to
+     * sit in, while the reader's tag is 「故事.-.喜剧」 (a 三级 under 故事, the 篇幅
+     * skipped). The identity of a level is its 大类, its level and its own last
+     * segment — the middle of the path is where the file is, not what the group is.
+     *
+     * A merge only happens when exactly one manual group answers to that identity:
+     * two hand-made 「喜剧」 tags under one 大类 are two groups, and folding a folder
+     * into either would be a guess.
+     */
+    const level1Name = (name: string) => name.split('.').filter((segment) => segment !== '-')[0] ?? name;
+    const lastSegment = (name: string) => {
+      const segments = name.split('.').filter((segment) => segment !== '-');
+      return segments[segments.length - 1] ?? name;
+    };
+    const identity = (name: string, level: number) =>
+      `${level1Name(name).toLowerCase()}|${level}|${lastSegment(name).toLowerCase()}`;
+    const manualByIdentity = new Map<string, typeof manual>();
+    for (const group of manual) {
+      const key = identity(group.name, group.level);
+      manualByIdentity.set(key, [...(manualByIdentity.get(key) ?? []), group]);
+    }
+    const standalone: typeof folders = [];
+    const absorbed = new Set<string>();
+    for (const folder of folders) {
+      const owners = manualByIdentity.get(identity(folder.name, folder.level)) ?? [];
+      if (owners.length !== 1) { standalone.push(folder); continue; }
+      const owner = owners[0]!;
+      owner.folderIds = [...(owner.folderIds ?? []), folder.id];
+      absorbed.add(owner.id);
+    }
+    // The count is the union of everything the chip now stands for: most of those
+    // books are in both, so adding the numbers would double them.
+    for (const owner of manual) {
+      if (!absorbed.has(owner.id) || !owner.folderIds?.length) continue;
+      owner.subtreeCount = ctx.shelf.countGroupFilter(user.id, [owner.id, ...owner.folderIds]);
+    }
+    const merged = [...manual, ...standalone].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    // 未分组 is always offered, last: after a default group or any filter is applied
+    // it is the only way back to the books that were never filed.
+    return { groups: [...merged, groups().unfiled(user.id)] };
   });
 
   app.post('/api/v1/groups', { preHandler: auth }, async (request, reply) => {
-    const body = (request.body ?? {}) as { name?: unknown };
-    const group = groups().create(currentUser(request).id, body.name);
+    const body = (request.body ?? {}) as { name?: unknown; parentId?: unknown; level?: unknown };
+    if (body.parentId !== undefined && typeof body.parentId !== 'string') {
+      throw badRequest('parentId must be a string');
+    }
+    if (body.level !== undefined && (typeof body.level !== 'number' || !Number.isInteger(body.level))) {
+      throw badRequest('level must be an integer');
+    }
+    const group = groups().create(currentUser(request).id, body.name, {
+      ...(body.parentId ? { parentId: body.parentId as string } : {}),
+      ...(body.level !== undefined ? { level: body.level as number } : {}),
+    });
     reply.code(201);
     return { group };
   });
@@ -608,12 +680,28 @@ export function registerLibraryRoutes(app: FastifyInstance, ctx: AppContext): vo
     return { group: groups().rename(user.id, id, body.name) };
   });
 
-  /** Unfiles every book from the group; the books themselves stay on the shelf. */
+  /** Unfiles every book from the group and its subgroups; the books stay on the shelf. */
   app.delete('/api/v1/groups/:id', { preHandler: auth }, async (request) => {
     const user = currentUser(request);
     const { id } = request.params as { id: string };
     groups().remove(user.id, id);
     return { removed: id };
+  });
+
+  /**
+   * The group the shelf opens with when no filter is in the URL.
+   *
+   * Stored with the groups (not in local settings) because it points at a group
+   * row that only exists on this account: the same choice then follows the reader
+   * to another device, and deleting the group clears it by construction.
+   */
+  app.put('/api/v1/groups/default', { preHandler: auth }, async (request) => {
+    const user = currentUser(request);
+    const body = (request.body ?? {}) as { groupId?: unknown };
+    if (body.groupId !== undefined && body.groupId !== null && typeof body.groupId !== 'string') {
+      throw badRequest('groupId must be a string or null');
+    }
+    return { defaultGroupId: groups().setDefault(user.id, (body.groupId as string | undefined) ?? null) };
   });
 
   /** Replaces one book's groups *for this account*; other readers keep their own. */

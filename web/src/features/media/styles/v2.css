@@ -900,8 +900,6 @@
 .media-screen .media-library-management-actions>summary {color:var(--text)}
 .media-screen .media-library-management-actions[open]>summary {background:var(--media-selection);color:var(--media-accent)}
 .search-split{position:relative;isolation:isolate}
-.sources-search .search-menu{right:0;left:auto;min-width:260px;box-sizing:border-box}
-@media(max-width:640px){.sources-search .search-menu{right:0;min-width:min(290px,calc(100vw - 32px))}}
 
 /* Keep the embedded player's own controls independent from the reader theme. */
 .media-video-stage,.media-video-stage *{color-scheme:dark}

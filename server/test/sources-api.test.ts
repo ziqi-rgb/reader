@@ -761,9 +761,13 @@ test('chapter-cache routes keep chapters on this server and hand them back as a 
   const provider: SourceProvider = {
     descriptor: {
       id: 'cache-chapters', label: '缓存源', version: '1',
-      capabilities: ['detail', 'acquire.chapters', 'content.manifest', 'content.resource'],
+      capabilities: ['detail', 'acquire.chapters', 'content.manifest', 'content.resource', 'search', 'browse'],
     },
     async detail() { return { ref: 'book', title: '缓存书' }; },
+    // One result, whose ref is also what `acquire` binds: both the search stream and
+    // the browse page should report the book it already became.
+    async search() { return { items: [{ ref: 'book', title: '缓存书' }] }; },
+    async browse() { return { items: [{ ref: 'book', title: '缓存书' }] }; },
     async acquire() { return { kind: 'chapters', publicationRef: 'book' }; },
     async getManifest(_ctx, publicationRef) {
       return {
@@ -798,6 +802,27 @@ test('chapter-cache routes keep chapters on this server and hand them back as a 
   // Which chapters, so a client can ask only for what is missing.
   assert.deepEqual(info.json().indexes, [1, 2]);
 
+  // The shelf asks once for every book it is about to draw, not once per card.
+  const shelfCache = await h.app.inject({ method: 'GET', url: '/api/v1/library/chapter-cache', headers: auth(h.admin) });
+  assert.equal(shelfCache.statusCode, 200, shelfCache.body);
+  assert.deepEqual(shelfCache.json().books, [{ bookId, chapters: 2 }]);
+
+  // A search result carries the book it already became, so the browser can offer
+  // 去阅读 instead of 加入书架 — and the badge disappears once it leaves the shelf.
+  const search = await h.app.inject({
+    method: 'POST', url: '/api/v1/sources/cache-instance/search',
+    headers: auth(h.admin), payload: { query: '缓存', sessionId: 'cache-search-session' },
+  });
+  const firstResult = streamEvents(search.body)[0]?.data as { items: Array<{ ref: string; bookId?: string }> };
+  assert.equal(firstResult.items[0]?.bookId, bookId);
+  const browse = await h.app.inject({ method: 'GET', url: '/api/v1/sources/cache-instance/browse', headers: auth(h.admin) });
+  assert.equal(browse.statusCode, 200, browse.body);
+  assert.equal((browse.json() as { items: Array<{ bookId?: string }> }).items[0]?.bookId, bookId);
+  h.ctx.db.run('UPDATE user_books SET hidden = 1 WHERE book_id = ?', bookId);
+  assert.deepEqual([...h.ctx.sources!.ownedEntries(h.admin.id, 'cache-instance')], []);
+  // Put it back: the rest of this test reads the book, and a hidden book is a 404.
+  h.ctx.db.run('UPDATE user_books SET hidden = 0 WHERE book_id = ?', bookId);
+
   const zip = await h.app.inject({ method: 'GET', url: `/api/v1/books/${bookId}/chapter-cache/zip`, headers: auth(h.admin) });
   assert.equal(zip.statusCode, 200, zip.body);
   assert.equal(zip.headers['content-type'], 'application/zip');
@@ -821,4 +846,55 @@ test('chapter-cache routes keep chapters on this server and hand them back as a 
   const empty = await h.app.inject({ method: 'GET', url: `/api/v1/books/${bookId}/chapter-cache/zip`, headers: auth(h.admin) });
   assert.equal(empty.statusCode, 400);
   assert.equal(empty.json().error.code, 'NO_SERVER_CACHE');
+});
+
+test('追更接口按分组与手动连载标记筛选，参数非法时明确报错', async (t) => {
+  const h = await harness(); t.after(() => h.close());
+  const db = h.ctx.db;
+  db.run(`INSERT INTO source_instances (id, plugin_id, source_type, name, created_at) VALUES ('p1','reader.chapters','chapters','源',0)`);
+  const followed = (id: string, title: string) => {
+    db.run(`INSERT INTO books (id, content_hash, content_hash_kind, format, title, author, language, description,
+      pubdate, page_count, meta_json, source, cover_path, created_at, updated_at)
+      VALUES (?,?,'manifest','chapters',?,'','','','',1,'{}','provider:p1',NULL,0,0)`, id, id, title);
+    db.run(`INSERT INTO chapter_publications (book_id, user_id, source_id, publication_ref, revision, version, snapshot_json, updated_at)
+      VALUES (?,?,'p1',?,?,NULL,?,0)`, id, h.admin.id, id, id, JSON.stringify({
+      publicationRef: id,
+      items: [{ id: 'c1', seq: 0, title: '第一章', kind: 'chapter', mediaType: 'text/plain', ref: 'r1' }],
+    }));
+    db.run('INSERT INTO user_books (user_id, book_id, added_at, hidden) VALUES (?,?,0,0)', h.admin.id, id);
+    db.run('INSERT INTO chapter_subscriptions (book_id) VALUES (?)', id);
+  };
+  followed('b1', '甲书'); followed('b2', '乙书');
+  db.run("INSERT INTO book_groups (id, user_id, name, created_at, updated_at) VALUES ('g1',?,'小说.奇幻',0,0)", h.admin.id);
+  db.run("INSERT INTO book_group_members (group_id, book_id, added_at) VALUES ('g1','b1',0)");
+
+  const list = async (query = '') => {
+    const response = await h.app.inject({ method: 'GET', url: `/api/v1/subscriptions${query}`, headers: auth(h.admin) });
+    assert.equal(response.statusCode, 200, response.body);
+    return response.json().subscriptions as Array<{ bookId: string; serialStatus: string | null; groups: Array<{ name: string }> }>;
+  };
+  assert.equal((await list()).length, 2);
+  assert.deepEqual((await list('?groups=g1')).map((row) => row.bookId), ['b1']);
+  // 每一级有自己的「非」：条件是排除，所以另一本留下。
+  assert.deepEqual((await list('?groups=g1&groupMode2=not')).map((row) => row.bookId), ['b2']);
+  assert.deepEqual((await list('?groups=g1'))[0]!.groups.map((group) => group.name), ['小说.奇幻']);
+
+  const marked = await h.app.inject({
+    method: 'PATCH', url: '/api/v1/books/b1/subscription', headers: auth(h.admin), payload: { serialStatus: 'completed' },
+  });
+  assert.equal(marked.statusCode, 200, marked.body);
+  assert.equal(marked.json().subscription.serialStatus, 'completed');
+  assert.deepEqual((await list('?serial=unfinished')).map((row) => row.bookId), ['b2']);
+  assert.deepEqual((await list('?serial=completed')).map((row) => row.bookId), ['b1']);
+  assert.deepEqual((await list('?serial=ongoing')), []);
+
+  const badStatus = await h.app.inject({
+    method: 'PATCH', url: '/api/v1/books/b1/subscription', headers: auth(h.admin), payload: { serialStatus: 'done' },
+  });
+  assert.equal(badStatus.statusCode, 400);
+  const badSerial = await h.app.inject({ method: 'GET', url: '/api/v1/subscriptions?serial=done', headers: auth(h.admin) });
+  assert.equal(badSerial.statusCode, 400);
+  // 分组模式写错和书架一样是 400，而不是悄悄当成「或」。
+  const badMode = await h.app.inject({ method: 'GET', url: '/api/v1/subscriptions?groups=g1&groupMode2=all', headers: auth(h.admin) });
+  assert.equal(badMode.statusCode, 400);
 });

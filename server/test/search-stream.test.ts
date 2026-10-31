@@ -12,6 +12,9 @@ for (const reason of ['complete', 'provider_error', 'connection_closed']) test(`
   const request = { raw: new EventEmitter(), log: { info: log, warn: log } } as unknown as FastifyRequest;
   const raw = new EventEmitter(), reply = { raw } as unknown as FastifyReply;
   const host = {
+    // The stream annotates results with the book each one already became; this
+    // stub has no shelf, so nothing is owned.
+    ownedEntries: () => new Map<string, string>(),
     async search() {
       if (reason === 'provider_error') throw new AppError(504, 'PLUGIN_TIMEOUT', 'deadline');
       if (reason === 'connection_closed') raw.emit('close');

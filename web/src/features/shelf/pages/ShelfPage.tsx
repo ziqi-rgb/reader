@@ -1,22 +1,25 @@
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { coverTint } from '../../../ui/cover-tint.ts';
 import { BookGridSkeleton } from '../../../ui/book-grid-skeleton.tsx';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { BookOpen, LibraryBig, Search } from 'lucide-react';
 import { Sheet } from '../../../ui/sheet.tsx';
-import type { Book, ContinueReadingItem, GroupMode, ReadingState } from '../../../api/types.ts';
+import type { Book, BookGroup, ContinueReadingItem, GroupMode, ReadingState } from '../../../api/types.ts';
 import { useRuntime } from '../../../app/providers/runtime-context.tsx';
 import { useSettingsStore } from '../../../shared/stores/settings.store.ts';
 import { useShelf, useBookGroups, type ShelfFilters } from '../queries/shelf.queries.ts';
 import { foldSeries } from '../series.ts';
+import { defaultGroup, groupFilterIds, groupFilterValue, isManualGroup, subGroupValuesOf, activeTopGroupOf, type GroupModes } from '../groups.ts';
 import { BookDetailSheet, type BookMetadataDraft } from '../components/BookDetailSheet.tsx';
+import { GroupFilterBar, GroupFilterSheet } from '../components/group-filter.tsx';
 import { SHELF_SORTS, ShelfSettingsSheet } from '../../../ui/shelf-settings.tsx';
 import { IconButton, Callout } from '../../../ui/toolkit.tsx';
 import { OpdsAccess } from '../../../ui/opds-access.tsx';
 import { DialogView, type Dialog } from '../../../ui/dialog.tsx';
 import { FloatingNotice } from '../../../ui/floating-notice.tsx';
 import { useSwipeTabs } from '../../../shared/ui/use-swipe-tabs.ts';
+import { ServerCacheBadge, type CacheProgress } from '../components/server-cache-badge.tsx';
 
 const coverCache = new WeakMap<object, Map<string, string>>();
 
@@ -64,7 +67,7 @@ export function useCover(api: ReturnType<typeof useRuntime>['api'], coverUrl: st
   return src;
 }
 
-export function BookCard({ book, showAuthor, showProgress, onRemove, selecting, selected, onToggle }: { book: Book | ContinueReadingItem; showAuthor: boolean; showProgress: boolean; onRemove?: () => void; selecting?: boolean; selected?: boolean; onToggle?: () => void }) {
+export function BookCard({ book, showAuthor, showProgress, onRemove, selecting, selected, onToggle, cache }: { book: Book | ContinueReadingItem; showAuthor: boolean; showProgress: boolean; onRemove?: () => void; selecting?: boolean; selected?: boolean; onToggle?: () => void; cache?: CacheProgress | undefined }) {
   const runtime = useRuntime();
   const src = useCover(runtime.api, book.coverUrl);
   const progress = 'percentage' in book ? book.percentage : runtime.offline?.progressFor(book.id)?.percentage;
@@ -91,6 +94,9 @@ export function BookCard({ book, showAuthor, showProgress, onRemove, selecting, 
         <div className="title">{book.title || '未命名'}</div>
         {showAuthor && <div className="author">{book.author || '未知作者'}</div>}
       </Link>}
+    {/* Its own layer on the card, not a slot inside the cover: the cover already
+        carries the format badge (bottom-right) and the progress bar (bottom edge). */}
+    {cache && <ServerCacheBadge progress={cache} />}
     {'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}
   </div>;
 }
@@ -98,6 +104,31 @@ export function BookCard({ book, showAuthor, showProgress, onRemove, selecting, 
 const readingLabels: Record<ReadingState, string> = { reading: '在读', want: '想读', finished: '已读' };
 const readingStates = ['reading', 'want', 'finished'] as const;
 const isReadingState = (value: string | null): value is ReadingState => readingStates.includes(value as ReadingState);
+
+/**
+ * The badge's numbers for one book, or nothing.
+ *
+ * Only a source novel has a server-side chapter cache; a local EPUB/PDF/CBZ is a
+ * file that is already on the server, so "downloaded?" has no answer to draw.
+ */
+export function cacheProgressOf(book: Book, cache: ReadonlyMap<string, number>): CacheProgress | undefined {
+  if (book.format !== 'chapters') return undefined;
+  const total = book.pageCount ?? 0;
+  if (total <= 0) return undefined;
+  return { cached: Math.min(cache.get(book.id) ?? 0, total), total };
+}
+
+/** A 丛书 in the same terms: everything its volumes have cached together. */
+export function seriesCacheProgress(books: readonly Book[], cache: ReadonlyMap<string, number>): CacheProgress | undefined {
+  let cached = 0, total = 0;
+  for (const book of books) {
+    const progress = cacheProgressOf(book, cache);
+    if (!progress) continue;
+    cached += progress.cached;
+    total += progress.total;
+  }
+  return total > 0 ? { cached, total } : undefined;
+}
 type BookAction = ReadingState | 'clear' | 'remove' | 'editSeries' | 'clearSeries' | 'detail' | 'seriesDetail';
 
 /** A stack of same-series books collapsed into one shelf slot. */
@@ -108,7 +139,7 @@ function SeriesCover({ url, fallback }: { url: string | null; fallback: string }
 }
 
 /** A stack of same-series books collapsed into one shelf slot. */
-export function SeriesCard({ books, showAuthor, onRemove, expandable = true }: { books: Book[]; showAuthor: boolean; onRemove?: (books: Book[]) => void; expandable?: boolean }) {
+export function SeriesCard({ books, showAuthor, onRemove, expandable = true, cache }: { books: Book[]; showAuthor: boolean; onRemove?: (books: Book[]) => void; expandable?: boolean; cache?: CacheProgress | undefined }) {
   const [expanded, setExpanded] = useState(false);
   const first = books[0];
   // The volume the reader is actually in: most recently read wins, then the 在读
@@ -142,6 +173,7 @@ export function SeriesCard({ books, showAuthor, onRemove, expandable = true }: {
       <div className="series-current">{progressLabel}</div>
       {showAuthor && <div className="author">{first.author || '未知作者'}</div>}
     </Link>
+    {cache && <ServerCacheBadge progress={cache} />}
     {expandable && expanded && <div className="series-list">{books.map(book => <div key={book.id} className="series-item" data-current={book.id === current.id ? 'true' : undefined}><span className="series-item-lead"><span className="series-item-num">{book.seriesIndex ?? '·'}</span>{'readingState' in book && book.readingState && <span className="book-state" data-state={book.readingState}>{readingLabels[book.readingState]}</span>}</span><Link to={`/book/${encodeURIComponent(book.id)}`}>{book.title || '未命名'}</Link></div>)}</div>}
   </div>;
 }
@@ -190,8 +222,14 @@ export function ShelfPage() {
   // 在读 / 想读 / 已读 and the reader's own groups (或 / 与 / 非), all in the URL like the page and sort.
   const status = isReadingState(params.get('status')) ? params.get('status') as ReadingState : undefined;
   const groupIds = (params.get('groups') ?? '').split(',').map(value => value.trim()).filter(Boolean);
-  const groupMode: GroupMode = params.get('groupMode') === 'and' ? 'and' : params.get('groupMode') === 'not' ? 'not' : 'or';
-  const filters: ShelfFilters = { ...(status ? { status } : {}), ...(groupIds.length > 0 ? { groups: groupIds, groupMode } : {}) };
+  const readMode = (value: string | null): GroupMode => (value === 'and' ? 'and' : value === 'not' ? 'not' : 'or');
+  // Each level has its own 或 / 与 / 非; `groupMode` is the one-mode form older URLs carry.
+  const groupModes: GroupModes = {
+    2: readMode(params.get('groupMode2') ?? params.get('groupMode')),
+    3: readMode(params.get('groupMode3') ?? params.get('groupMode')),
+    4: readMode(params.get('groupMode4') ?? params.get('groupMode')),
+  };
+  const filters: ShelfFilters = { ...(status ? { status } : {}), ...(groupIds.length > 0 ? { groups: groupIds, groupModes } : {}) };
   const filtered = !!(status || groupIds.length > 0);
   const groups = useBookGroups();
   const query = useShelf(page, sort, queryText, filters);
@@ -199,18 +237,38 @@ export function ShelfPage() {
   const cards = useMemo(() => query.data?.items ?? [], [query.data]);
   // Same-series books (≥2) share one slot; `foldSeries` is shared with the home rail.
   const folded = useMemo(() => foldSeries(cards), [cards]);
+  /**
+   * Server-side chapter cache for the whole shelf, in one request.
+   *
+   * Only the *server* copy: the browser's session cache dies with the browser,
+   * so drawing it here would promise something the reader cannot rely on.
+   */
+  const cacheSummary = useQuery({
+    queryKey: ['chapter-cache-summary', runtime.api.baseUrl],
+    queryFn: () => runtime.api.chapterCacheSummary(),
+    staleTime: 15_000,
+  });
+  const serverCache = useMemo(
+    () => new Map((cacheSummary.data?.books ?? []).map(entry => [entry.bookId, entry.chapters] as const)),
+    [cacheSummary.data],
+  );
   useEffect(() => { void runtime.updateSettings({ shelfSort: sort }); }, [runtime, sort]);
   // Every navigation keeps what it does not change; a new filter or query starts at page 1.
-  const go = (next: { q?: string; sort?: typeof sort; page?: number; status?: ReadingState | null; groups?: string[] | null; groupMode?: GroupMode }) => {
+  const go = (next: { q?: string; sort?: typeof sort; page?: number; status?: ReadingState | null; groups?: string[] | null; groupModes?: GroupModes }) => {
     const q = next.q ?? queryText, nextStatus = next.status === undefined ? status : next.status ?? undefined;
     const nextGroups = next.groups === undefined ? groupIds : next.groups ?? [];
-    const nextMode = next.groupMode ?? groupMode;
+    const nextModes = next.groupModes ?? groupModes;
     setParams({
       ...(q ? { q } : {}), sort: next.sort ?? sort, page: String(next.page ?? 1),
       ...(nextStatus ? { status: nextStatus } : {}),
-      // One group in 或 is the plain case; anything else has to say how it combines.
+      // 或 is the default for every level; anything else has to be said per level.
       ...(nextGroups.length > 0
-        ? { groups: nextGroups.join(','), ...(nextGroups.length > 1 || nextMode !== 'or' ? { groupMode: nextMode } : {}) }
+        ? {
+          groups: nextGroups.join(','),
+          ...(nextModes[2] !== 'or' ? { groupMode2: nextModes[2] } : {}),
+          ...(nextModes[3] !== 'or' ? { groupMode3: nextModes[3] } : {}),
+          ...(nextModes[4] !== 'or' ? { groupMode4: nextModes[4] } : {}),
+        }
         : {}),
     });
   };
@@ -255,7 +313,8 @@ export function ShelfPage() {
       // A 丛书 stack is filed as one set: every volume gets the same groups.
       setSeriesTarget(books);
       // Start from the groups all volumes already share, so re-saving is a no-op.
-      const shared = (book.groups ?? []).map(group => group.id)
+      // Folder groups are read-only, so they never become part of the selection.
+      const shared = (book.groups ?? []).filter(group => group.kind !== 'folder').map(group => group.id)
         .filter(id => books.every(item => (item.groups ?? []).some(group => group.id === id)));
       setSeriesTargetIds(shared);
       setSeriesTargetError('');
@@ -366,16 +425,61 @@ export function ShelfPage() {
       await refreshShelf();
     } catch (error) { setActionError(error instanceof Error ? error.message : '保存失败，请稍后重试。'); }
   };
-  // ---- 分组筛选（可多选，或 / 与 / 非）----
-  const [draftGroupIds, setDraftGroupIds] = useState<string[]>([]);
-  const [draftGroupMode, setDraftGroupMode] = useState<GroupMode>('or');
-  const groupModeLabel = groupMode === 'and' ? '与' : groupMode === 'not' ? '非' : '或';
-  const openGroupFilter = () => {
-    setDraftGroupIds(groupIds);
-    setDraftGroupMode(groupMode);
-    setGroupsOpen(true);
+  // ---- 分组筛选：一级组是书架上的按钮，二级/三级/四级在这个面板里（或 / 与 / 非）----
+  /** The default group is applied once per mount (see the effect below). */
+  const defaultApplied = useRef(false);
+  const allGroups = groups.data ?? [];
+  /** The reader's own groups: the derived kinds (folder, 未分组) are not choosable. */
+  const manualGroups = useMemo(() => allGroups.filter(isManualGroup), [allGroups]);
+  /**
+   * The section the shelf is showing.
+   *
+   * A URL may name a subgroup (`?groups=<二级组 id>`), so the top-level group is
+   * looked up from the path rather than assumed to be selected itself: that keeps
+   * one top-level button pressed and decides which blocks the sheet offers.
+   */
+  const activeLevel1 = useMemo(() => activeTopGroupOf(allGroups, groupIds), [groupIds, allGroups]);
+  /**
+   * The 分组 chip's own filters (everything below the top level), as `groups`
+   * values — one value per chip, because a merged chip is one condition.
+   */
+  const subGroupFilters = useMemo(() => subGroupValuesOf(allGroups, groupIds), [groupIds, allGroups]);
+  /**
+   * The default group: the shelf opens on it when the URL names no filter.
+   *
+   * Applied once per mount instead of on every render — 清除分组 writes a URL with
+   * no `groups`, and re-applying the default would make that button look broken.
+   * A reload starts the section again, which is the point of calling it default.
+   */
+  useEffect(() => {
+    if (defaultApplied.current || !groups.data) return;
+    defaultApplied.current = true;
+    if (params.get('groups')) return;
+    const fallback = defaultGroup(groups.data);
+    if (fallback) go({ groups: [groupFilterValue(fallback)] });
+    // `go` is rebuilt every render; the ref above is what keeps this a one-shot.
+  }, [groups.data, params]);
+  /**
+   * The names behind one `groups` value, for a chip's accessible label.
+   *
+   * A merged value also carries a folder id, which is not in the list (the server
+   * folded it into the manual group) — those parts contribute no name of their own.
+   */
+  const filterLabel = (value: string) => {
+    const names = groupFilterIds(value)
+      .map(id => groups.data?.find(group => group.id === id)?.name)
+      .filter((name): name is string => Boolean(name));
+    return names.length > 0 ? names.join(' · ') : '已删除的分组';
   };
-  const groupName = (id: string) => groups.data?.find(group => group.id === id)?.name ?? '已删除的分组';
+  /** One top-level group at a time; pressing the active one goes back to the default. */
+  const toggleLevel1 = (group: BookGroup) => {
+    if (activeLevel1?.id === group.id) {
+      const fallback = defaultGroup(allGroups);
+      go({ groups: fallback ? [groupFilterValue(fallback)] : null });
+      return;
+    }
+    go({ groups: [groupFilterValue(group)] });
+  };
   // Batch-tag entry: toggle a card's books in/out of the selection, then open the 丛书 editor.
   const toggleSelect = (entry: Book | { series: Book[] }) => {
     const ids = 'id' in entry ? [entry.id] : entry.series.map(b => b.id);
@@ -472,12 +576,15 @@ export function ShelfPage() {
           <button type="button" className="chip" aria-pressed={!status} onClick={() => go({ status: null })}>全部</button>
           {readingStates.map(state => <button key={state} type="button" className="chip" aria-pressed={status === state} onClick={() => go({ status: state })}>{readingLabels[state]}</button>)}
         </div>
-        <button type="button" className={groupIds.length > 0 ? 'chip shelf-group-active' : 'chip shelf-group'}
-          aria-pressed={groupIds.length > 0} aria-haspopup="dialog"
-          aria-label={groupIds.length > 0 ? `分组：${groupIds.map(groupName).join('、')}（${groupModeLabel}），点按修改` : '分组筛选'}
-          onClick={openGroupFilter}>
-          分组{groupIds.length > 0 ? ` · ${groupIds.length} · ${groupModeLabel}` : ''}
-        </button>
+        <GroupFilterBar
+          groups={allGroups}
+          activeLevel1={activeLevel1}
+          subFilterCount={subGroupFilters.length}
+          subFilterLabel={subGroupFilters.map(filterLabel).join('、')}
+          showCounts
+          onToggleLevel1={toggleLevel1}
+          onOpenFilter={() => setGroupsOpen(true)}
+        />
       </div>
       <FloatingNotice message={actionError} error />
       {(!query.isPending && (cards.length > 0 || queryText || filtered)) && <div className="shelf-toolbar"><span className="shelf-count muted">{queryText ? `找到 ${query.data?.total ?? 0} 本` : `共 ${query.data?.total ?? 0} 本`}</span><div className="shelf-sort" role="group" aria-label="排序方式">{SHELF_SORTS.map(option => <button key={option.value} type="button" className="chip" aria-pressed={option.value === sort} onClick={() => onSort(option.value)}>{option.label}</button>)}</div><button type="button" className="chip" aria-pressed={selectMode} onClick={() => { setSelectMode(v => !v); if (selectMode) setSelected(new Set()); }}>{selectMode ? '取消选择' : '批量标记'}</button></div>}
@@ -486,55 +593,27 @@ export function ShelfPage() {
       {query.data && cards.length === 0 && filtered && !queryText && <div className="empty-state collection-empty"><BookOpen className="empty-glyph" aria-hidden="true" /><p>{status ? `还没有${readingLabels[status]}的书` : '这个分组里没有书'}</p><p className="muted">{status === 'want' ? '在书籍的“⋯”菜单里可以标记想读。' : '换一个分类，或查看全部书籍。'}</p><div className="empty-actions"><button type="button" className="button" onClick={clearFilters}>查看全部书籍</button></div></div>}
       {query.data && cards.length === 0 && !(filtered && !queryText) && <div className="empty-state collection-empty"><BookOpen className="empty-glyph" aria-hidden="true" /><p>{queryText ? '没有匹配的书' : '书架还没有书'}</p><p className="muted">{queryText ? '换个关键词，或者检查一下作者名的写法' : '从书库挑选喜欢的书，或通过书源搜索，加入书架后就能开始阅读。'}</p><div className="empty-actions">{queryText ? <button type="button" className="button" onClick={clearSearch}>清除搜索</button> : <><Link className="button primary" to="/sources"><Search size={16} />去搜书</Link><Link className="button" to="/library"><LibraryBig size={16} />打开书库</Link></>}</div></div>}
       {selectMode && <div className="shelf-batch-bar"><button type="button" className="chip" onClick={() => { const all = cards.map(b => (b as Book).id); const allSel = all.length > 0 && all.every(id => selected.has(id)); setSelected(allSel ? new Set() : new Set(all)); }}>{selected.size === cards.length && cards.length > 0 ? '取消全选' : '全选'}</button><span className="muted">已选 {selected.size}</span><button type="button" className="button primary" disabled={selected.size === 0} onClick={startBatchEdit}>标记为丛书</button></div>}
-      {folded.length > 0 && <div className="book-grid" data-density={settings.shelfDensity} data-show-author={String(settings.shelfShowAuthor)} data-show-progress={String(settings.shelfShowProgress)} data-selecting={String(selectMode)}>{selectMode ? cards.map(book => <BookCard key={book.id} book={book as Book} showAuthor={settings.shelfShowAuthor} showProgress={settings.shelfShowProgress} selecting selected={selected.has((book as Book).id)} onToggle={() => toggleSelect(book)} />) : folded.map(entry => 'id' in entry ? <BookCard key={entry.id} book={entry as Book} showAuthor={settings.shelfShowAuthor} showProgress={settings.shelfShowProgress} onRemove={() => setMenuTarget([entry as Book])} /> : <SeriesCard key={'s:' + entry.series[0].series} books={entry.series} showAuthor={settings.shelfShowAuthor} onRemove={list => setMenuTarget(list)} />)}</div>}
+      {folded.length > 0 && <div className="book-grid" data-density={settings.shelfDensity} data-show-author={String(settings.shelfShowAuthor)} data-show-progress={String(settings.shelfShowProgress)} data-selecting={String(selectMode)}>{selectMode ? cards.map(book => <BookCard key={book.id} book={book as Book} showAuthor={settings.shelfShowAuthor} showProgress={settings.shelfShowProgress} selecting selected={selected.has((book as Book).id)} onToggle={() => toggleSelect(book)} />) : folded.map(entry => 'id' in entry ? <BookCard key={entry.id} book={entry as Book} showAuthor={settings.shelfShowAuthor} showProgress={settings.shelfShowProgress} cache={cacheProgressOf(entry as Book, serverCache)} onRemove={() => setMenuTarget([entry as Book])} /> : <SeriesCard key={'s:' + entry.series[0].series} books={entry.series} showAuthor={settings.shelfShowAuthor} cache={seriesCacheProgress(entry.series, serverCache)} onRemove={list => setMenuTarget(list)} />)}</div>}
       {query.data && pages > 1 && <nav className="shelf-pager" aria-label="翻页"><button type="button" disabled={page <= 1} onClick={() => go({ page: page - 1 })}>上一页</button><span>{page} / {pages}</span><button type="button" disabled={page >= pages} onClick={() => go({ page: page + 1 })}>下一页</button></nav>}
     </section>
     {settingsOpen && <ShelfSettingsSheet settings={settings} onPatch={patch => { void runtime.updateSettings(patch); }} onClose={() => setSettingsOpen(false)} onOpenExternalReader={() => { setSettingsOpen(false); setOpdsOpen(true); }} />}
     {opdsOpen && <OpdsAccess api={runtime.api} onSignedOut={() => { void runtime.api.signOut(); }} onClose={() => { setOpdsOpen(false); setSettingsOpen(true); }} />}
     {menuTarget && <DialogView dialog={{ kind: 'pick', title: menuTarget.length > 1 ? `${menuTarget[0].series || '丛书'}（${menuTarget.length} 册）` : `《${menuTarget[0].title || '未命名'}》`, options: menuOptions(menuTarget), resolve: (_value: string | null) => undefined } satisfies Dialog} destructive={menuTarget.length > 1 ? '' : '从书架拿掉'} onClose={answer => { const target = menuTarget; setMenuTarget(null); if (typeof answer === 'string' && answer) void act(target, answer as BookAction); }} />}
-    {groupsOpen && <Sheet title="分组筛选" subtitle={`${groups.data?.length ?? 0} 个分组`} onClose={() => setGroupsOpen(false)}
-      footer={<>
-        <button type="button" className="button" onClick={() => { setGroupsOpen(false); go({ groups: null }); }}>清除分组</button>
-        <Link className="button" to="/shelf/groups">管理分组</Link>
-        <button type="button" className="button primary" onClick={() => { setGroupsOpen(false); go({ groups: draftGroupIds, groupMode: draftGroupMode }); }}>应用</button>
-      </>}>
-      <div className="sheet-form">
-        {groups.isPending && <p className="sheet-text muted">正在读取分组…</p>}
-        {groups.error && <Callout tone="error">分组读取失败：{groups.error.message}</Callout>}
-        {!groups.isPending && !groups.error && (groups.data?.length ?? 0) === 0 && <div className="sheet-text">
-          <p>还没有分组。分组是你自己的书架结构，和文件里的系列、标签无关。</p>
-          <Link className="button" to="/shelf/groups">去创建分组</Link>
-        </div>}
-        {(groups.data?.length ?? 0) > 0 && <>
-          <div className="sheet-field">
-            <label>选择分组<span className="muted">（可多选）</span></label>
-            <div className="chip-row" role="group" aria-label="选择分组">
-              {groups.data!.map(group => <button key={group.id} type="button" className="chip"
-                aria-pressed={draftGroupIds.includes(group.id)}
-                aria-label={`${group.name}，${group.bookCount} 本`}
-                onClick={() => setDraftGroupIds(current => (current.includes(group.id)
-                  ? current.filter(id => id !== group.id)
-                  : [...current, group.id]))}>
-                {group.name}<span className="muted"> {group.bookCount}</span>
-              </button>)}
-            </div>
-          </div>
-          <div className="sheet-field">
-            <label>多选时怎么组合</label>
-            <div className="chip-row" role="group" aria-label="组合方式">
-              {([['or', '或'], ['and', '与'], ['not', '非']] as const).map(([value, label]) => <button key={value} type="button" className="chip"
-                aria-pressed={draftGroupMode === value} disabled={draftGroupIds.length < 2 && value !== 'or'}
-                onClick={() => setDraftGroupMode(value)}>{label}</button>)}
-            </div>
-            <p className="sheet-text muted">或：属于任一所选分组 · 与：同时属于全部所选分组 · 非：不属于任何一个所选分组</p>
-          </div>
-        </>}
-      </div>
-    </Sheet>}
+    {groupsOpen && <GroupFilterSheet
+      groups={allGroups}
+      selected={groupIds}
+      modes={groupModes}
+      activeLevel1={activeLevel1}
+      pending={groups.isPending}
+      error={groups.error}
+      extraFooter={<Link className="button" to="/shelf/groups">管理分组</Link>}
+      onApply={({ groups: next, modes }) => { setGroupsOpen(false); go({ groups: next.length > 0 ? next : null, groupModes: modes }); }}
+      onClose={() => setGroupsOpen(false)}
+    />}
     {detailTarget && <BookDetailSheet
       key={`${detailTarget.id}:${detailTarget.updatedAt}`}
       book={detailTarget}
-      groups={groups.data ?? []}
+      groups={manualGroups}
       busy={detailBusy}
       error={detailError}
       onSave={(draft, nextGroupIds) => void saveBookDetail(draft, nextGroupIds)}
@@ -554,10 +633,10 @@ export function ShelfPage() {
         {seriesTargetError && <Callout tone="error">{seriesTargetError}</Callout>}
         <div className="sheet-field">
           <label>分组<span className="muted">（整组统一设置，可多选）</span></label>
-          {(groups.data?.length ?? 0) === 0
+          {manualGroups.length === 0
             ? <p className="sheet-text muted">还没有分组。</p>
             : <div className="chip-row" role="group" aria-label="选择分组">
-              {groups.data!.map(group => <button key={group.id} type="button" className="chip"
+              {manualGroups.map(group => <button key={group.id} type="button" className="chip"
                 aria-pressed={seriesTargetIds.includes(group.id)}
                 aria-label={`${group.name}，${group.bookCount} 本`}
                 disabled={seriesTargetBusy}

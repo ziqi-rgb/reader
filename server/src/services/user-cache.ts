@@ -77,6 +77,31 @@ export class UserChapterCache {
     await rm(this.dir(userId, bookId), { recursive: true, force: true });
     return removed;
   }
+
+  /**
+   * How many chapters each book has cached, for the shelf's per-card indicator.
+   *
+   * Deliberately counts *file names* and never stats them: the shelf asks about
+   * every book the reader owns, and a per-file `stat` would turn one shelf paint
+   * into thousands of filesystem calls. A chapter count is all the badge needs.
+   */
+  async summary(userId: string): Promise<Array<{ bookId: string; chapters: number }>> {
+    const root = resolveInside(this.dataDir, join('user-cache', segment(userId)));
+    let entries: string[];
+    try {
+      entries = await readdir(root);
+    } catch {
+      // Nothing cached for this account yet.
+      return [];
+    }
+    const books: Array<{ bookId: string; chapters: number }> = [];
+    for (const bookId of entries) {
+      const names = await readdir(join(root, bookId)).catch(() => [] as string[]);
+      const chapters = names.filter((name) => name.endsWith('.txt')).length;
+      if (chapters > 0) books.push({ bookId, chapters });
+    }
+    return books;
+  }
 }
 
 /** `0007 第七章 归途.txt` — position first, so a plain file listing sorts. */

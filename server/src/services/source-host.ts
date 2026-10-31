@@ -242,6 +242,26 @@ export class SourceHost {
     return this.updates.check(userId, bookId, signal);
   }
 
+  /**
+   * Which entries of one source this account already has on its shelf.
+   *
+   * The pair `(source_id, entry_ref)` is the only identity an entry has — a site's
+   * own ids mean nothing at another site — so this is the answer to "did I already
+   * add this one", and the search stream attaches it to each result. Joined with
+   * `user_books` because a book removed from the shelf is not on it any more, and
+   * the search should then offer 加入书架 again (acquisition is idempotent and
+   * restores the same book).
+   */
+  ownedEntries(userId: string, sourceId: string): Map<string, string> {
+    const rows = this.db.all<{ entry_ref: string; book_id: string }>(
+      `SELECT a.entry_ref, a.book_id FROM source_acquisitions a
+        JOIN user_books u ON u.book_id = a.book_id AND u.user_id = a.user_id AND u.hidden = 0
+       WHERE a.source_id = ? AND a.user_id = ?`,
+      sourceId, userId,
+    );
+    return new Map(rows.map((row) => [row.entry_ref, row.book_id]));
+  }
+
   /** The reader's own chapter files for one book, under `DATA_DIR/user-cache`. */
   chapterCache(): UserChapterCache { return new UserChapterCache(this.config.dataDir); }
 

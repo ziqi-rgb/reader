@@ -13,7 +13,15 @@ const book = { id: 'b1', title: '夜航船', author: '示例作者', coverUrl: n
 let shelfItems: Array<Record<string, unknown>> = [book];
 vi.mock('../src/features/shelf/queries/shelf.queries.ts', () => ({
   useShelf: (...args: unknown[]) => { shelfCalls.push(args); return { data: { items: shelfItems, total: shelfItems.length, pageSize: 60 }, isPending: false, error: null }; },
-  useBookGroups: () => ({ data: [{ id: 'g1', name: '三体', bookCount: 1 }], isPending: false, error: null }),
+  useBookGroups: () => ({
+    data: [
+      // 三体 also has a folder group of the same name: the server merges them, so the
+      // chip writes both ids into the filter (one condition, OR-ed server-side).
+      { id: 'g1', name: '三体', bookCount: 1, subtreeCount: 2, level: 1, parentId: null, isDefault: false, kind: 'manual', folderIds: ['folder:三体'] },
+      { id: 'g2', name: '三体.黑暗森林', bookCount: 1, subtreeCount: 1, level: 2, parentId: 'g1', isDefault: false, kind: 'manual' },
+    ],
+    isPending: false, error: null,
+  }),
 }));
 const { ShelfPage } = await import('../src/features/shelf/pages/ShelfPage.tsx');
 
@@ -46,12 +54,19 @@ it('filters by reading state and by groups, keeping both in the URL', async () =
     .toEqual([['全部', 'false'], ['在读', 'false'], ['想读', 'true'], ['已读', 'false']]);
   await click('在读');
   expect(new URLSearchParams(location).get('status')).toBe('reading');
-  // 分组 is a multi-select sheet now: pick one, then 应用 writes `groups=<ids>` to the URL.
+  // 一级组 is folded into the filter row: open it, then one top-level group is the
+  // whole section (the server adds every subgroup below it, and the folder group of
+  // the same name — both ids go into the filter as one condition).
+  await act(() => root.querySelector<HTMLButtonElement>('[aria-label="展开一级组"]')!.click());
+  await act(() => root.querySelector<HTMLButtonElement>('[aria-label="三体，2 本"]')!.click());
+  expect(Object.fromEntries(new URLSearchParams(location))).toMatchObject({ status: 'reading', groups: 'g1+folder:三体', page: '1' });
+  expect(shelfCalls.at(-1)?.[3]).toEqual({ status: 'reading', groups: ['g1+folder:三体'], groupModes: { 2: 'or', 3: 'or', 4: 'or' } });
+  // 二级组 lives in the 分组 sheet: pick one and 应用 narrows the section to it.
   await click('分组');
-  await act(() => root.querySelector<HTMLButtonElement>('[aria-label="三体，1 本"]')!.click());
+  await act(() => root.querySelector<HTMLButtonElement>('[aria-label="三体.黑暗森林，1 本"]')!.click());
   await click('应用');
-  expect(Object.fromEntries(new URLSearchParams(location))).toMatchObject({ status: 'reading', groups: 'g1', page: '1' });
-  expect(shelfCalls.at(-1)?.[3]).toEqual({ status: 'reading', groups: ['g1'], groupMode: 'or' });
+  expect(new URLSearchParams(location).get('groups')).toBe('g2');
+  expect(shelfCalls.at(-1)?.[3]).toEqual({ status: 'reading', groups: ['g2'], groupModes: { 2: 'or', 3: 'or', 4: 'or' } });
   // The active filter is its own chip; pressing it reopens the picker, where 清除分组 drops it.
   await act(() => root.querySelector<HTMLButtonElement>('.shelf-group-active')!.click());
   await click('清除分组');
@@ -72,7 +87,8 @@ it('saves 书籍详情 through the metadata and group endpoints', async () => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(title, '夜航船（修订）');
     title.dispatchEvent(new Event('input', { bubbles: true }));
   });
-  await act(() => root.querySelector<HTMLButtonElement>('[aria-label="三体，1 本"]')!.click());
+  // 分组 is one level at a time now: the ＋ on a 一级组 files the book into that 大类.
+  await act(() => root.querySelector<HTMLButtonElement>('[aria-label="把书放进「三体」"]')!.click());
   // The save is async (two writes), so the click has to be awaited inside act.
   await act(async () => {
     [...root.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '保存')!.click();

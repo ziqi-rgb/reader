@@ -30,7 +30,7 @@ import type {
   User,
 } from './types.ts';
 import type { Platform } from '../core/platform.ts';
-import type { SourceType, SourceInstance, SourcePlugin, SourceEntry, SourcePage, SourceAcquisition, ChapterSubscription } from './sources.ts';
+import type { SourceType, SourceInstance, SourcePlugin, SourceEntry, SourcePage, SourceAcquisition, ChapterSubscription, SerialFilter, SerialStatus } from './sources.ts';
 import { affectedNavigationQuery, createReaderQueryClient, isNavigationQuery, readerQueryKey } from './query.ts';
 
 export interface SessionStore {
@@ -65,13 +65,19 @@ export interface ListQuery {
   /**
    * Reader-owned group ids, comma separated (the wire format the server parses).
    *
-   * `groupMode` decides how several of them combine: 或 (`or`), 与 (`and`),
-   * 非 (`not`). Groups are the only grouping dimension the shelf offers — series and
-   * tags come from the file, so filtering by them was really filtering by whatever
-   * the source file happened to carry.
+   * `groupMode2` / `groupMode3` / `groupMode4` decide how the selected groups of
+   * 篇幅 / tag / tag 细分 combine (或 / 与 / 非), one mode per level; the levels
+   * themselves are AND-ed. `groupMode` is the older single-mode form.
+   *
+   * Groups are the only grouping dimension the shelf offers — series and tags come
+   * from the file, so filtering by them was really filtering by whatever the source
+   * file happened to carry.
    */
   groups?: string;
   groupMode?: GroupMode;
+  groupMode2?: GroupMode;
+  groupMode3?: GroupMode;
+  groupMode4?: GroupMode;
   /**
    * Sort key.
    *
@@ -369,10 +375,27 @@ export class ReaderApi {
   async acquireSource(id: string, entryRef: string, optionId?: string): Promise<SourceAcquisition> {
     return this.call(`/api/v1/sources/${encodeURIComponent(id)}/acquire`, 'POST', { entryRef, ...(optionId ? { optionId } : {}) });
   }
-  async subscriptions(): Promise<ChapterSubscription[]> {
-    return (await this.get<{ subscriptions: ChapterSubscription[] }>('/api/v1/subscriptions')).subscriptions;
+  /**
+   * The followed books, narrowed like the shelf.
+   *
+   * `groups` / `groupModes` are the shelf's own four-level selection and `serial`
+   * is the hand-marked 连载状态 — the two questions a 追更 list of a few hundred
+   * books actually needs answered.
+   */
+  async subscriptions(query: { groups?: string[]; groupModes?: { 2: GroupMode; 3: GroupMode; 4: GroupMode }; serial?: SerialFilter } = {}): Promise<ChapterSubscription[]> {
+    const params = new URLSearchParams();
+    const groups = query.groups ?? [];
+    if (groups.length > 0) {
+      params.set('groups', groups.join(','));
+      // 或 is the default for every level; anything else has to be said per level.
+      const modes = query.groupModes ?? { 2: 'or', 3: 'or', 4: 'or' };
+      for (const level of [2, 3, 4] as const) if (modes[level] !== 'or') params.set(`groupMode${level}`, modes[level]);
+    }
+    if (query.serial) params.set('serial', query.serial);
+    const suffix = params.size > 0 ? `?${params.toString()}` : '';
+    return (await this.get<{ subscriptions: ChapterSubscription[] }>(`/api/v1/subscriptions${suffix}`)).subscriptions;
   }
-  async configureSubscription(id: string, patch: { enabled?: boolean; intervalMinutes?: number; acknowledge?: boolean }): Promise<void> {
+  async configureSubscription(id: string, patch: { enabled?: boolean; intervalMinutes?: number; acknowledge?: boolean; serialStatus?: SerialStatus | null }): Promise<void> {
     await this.call(`/api/v1/books/${encodeURIComponent(id)}/subscription`, 'PATCH', patch);
   }
 
@@ -425,6 +448,11 @@ export class ReaderApi {
   /** What this server already keeps of the book, for the reader's own account. */
   async chapterCache(id: string, options: RequestOptions = {}): Promise<import('./types.ts').ChapterCacheInfo> {
     return this.get(`/api/v1/books/${encodeURIComponent(id)}/chapter-cache`, options);
+  }
+
+  /** Every book with chapters on this server, for the shelf's per-card badge. */
+  async chapterCacheSummary(options: RequestOptions = {}): Promise<import('./types.ts').ChapterCacheSummary> {
+    return this.get('/api/v1/library/chapter-cache', options);
   }
 
   async clearChapterCache(id: string, options: RequestOptions = {}): Promise<{ removed: number }> {
@@ -567,8 +595,8 @@ export class ReaderApi {
     return (await this.get<{ groups: BookGroup[] }>('/api/v1/groups', options)).groups;
   }
 
-  async createBookGroup(name: string): Promise<BookGroup> {
-    return (await this.call<{ group: BookGroup }>('/api/v1/groups', 'POST', { name })).group;
+  async createBookGroup(name: string, options: { parentId?: string; level?: number } = {}): Promise<BookGroup> {
+    return (await this.call<{ group: BookGroup }>('/api/v1/groups', 'POST', { name, ...options })).group;
   }
 
   async renameBookGroup(id: string, name: string): Promise<BookGroup> {
@@ -577,6 +605,17 @@ export class ReaderApi {
 
   async deleteBookGroup(id: string): Promise<void> {
     await this.call('/api/v1/groups/' + encodeURIComponent(id), 'DELETE');
+  }
+
+  /**
+   * The group the shelf opens with, or `null` for "everything".
+   *
+   * Stored server-side with the groups: it points at a row only this account has,
+   * so it follows the reader to another device and disappears with the group.
+   */
+  async setDefaultBookGroup(groupId: string | null): Promise<string | null> {
+    const result = await this.call<{ defaultGroupId: string | null }>('/api/v1/groups/default', 'PUT', { groupId });
+    return result.defaultGroupId;
   }
 
   /** Replaces one book's groups for this account; other readers keep their own. */

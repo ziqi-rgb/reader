@@ -222,7 +222,12 @@ test('a prefetch fetches each chapter once and leaves a text file per chapter fo
 
     // Accounts are isolated: another reader sees nothing of this cache.
     assert.deepEqual(await files.list('u2', book), []);
+    // The shelf's badge asks one question — how many chapters per book — and it is
+    // answered from file names alone, never from a stat per chapter.
+    assert.deepEqual(await files.summary('u1'), [{ bookId: book, chapters: 2 }]);
+    assert.deepEqual(await files.summary('u2'), []);
     assert.equal(await files.clear('u1', book), 2);
+    assert.deepEqual(await files.summary('u1'), []);
     assert.deepEqual(await files.list('u1', book), []);
   } finally { f.db.close(); await rm(f.root, { recursive: true, force: true }); }
 });
@@ -262,6 +267,56 @@ test('durable subscriptions update once, accumulate new chapters, retry failures
     f.db.run('UPDATE user_books SET hidden = 1 WHERE book_id = ?', id);
     await updates.runDue(); assert.equal(f.chapters.manifest('u1', id).revision, snapshot);
     assert.equal(updates.list('u1').length, 0);
+    await updates.stop();
+  } finally { f.db.close(); await rm(f.root, { recursive: true, force: true }); }
+});
+
+test('追更列表按四级分组与手动连载标记筛选，标记不改动检查排期', async () => {
+  const f = await fixture();
+  let now = 5_000;
+  try {
+    const a = await f.chapters.acquire(f.provider, f.context, { entryRef: 'a' }, 'book-a', { ref: 'a', title: '甲书' });
+    const b = await f.chapters.acquire(f.provider, f.context, { entryRef: 'b' }, 'book-b', { ref: 'b', title: '乙书' });
+    const group = (id: string, name: string) => f.db.run(
+      'INSERT INTO book_groups (id, user_id, name, created_at, updated_at) VALUES (?,?,?,0,0)', id, 'u1', name);
+    group('g1', '小说'); group('g2', '小说.奇幻'); group('g3', '小说.奇幻.剑与魔法'); group('g4', '社科');
+    const file = (groupId: string, bookId: string) => f.db.run(
+      'INSERT INTO book_group_members (group_id, book_id, added_at) VALUES (?,?,0)', groupId, bookId);
+    file('g3', a); file('g2', b);
+
+    const updates = new ChapterUpdates(f.db, f.chapters, () => now);
+    updates.configure('u1', a, { enabled: true });
+    updates.configure('u1', b, { enabled: true });
+
+    // 选一级组选的是整棵子树，选四级组只选它自己。
+    assert.deepEqual(updates.list('u1', { groups: ['g1'] }).map((row) => row.bookId).sort(), [a, b].sort());
+    assert.deepEqual(updates.list('u1', { groups: ['g2'] }).map((row) => row.bookId).sort(), [a, b].sort());
+    assert.deepEqual(updates.list('u1', { groups: ['g3'] }).map((row) => row.bookId), [a]);
+    // 每一级有自己的或 / 与 / 非：三级「非 剑与魔法」把甲书排除在外。
+    assert.deepEqual(updates.list('u1', { groups: ['g3'], groupModes: { 3: 'not' } }).map((row) => row.bookId), [b]);
+    assert.deepEqual(updates.list('u1', { groups: ['g4'] }), []);
+    // 行上带着分组名，筛选结果和分组标签才不会各说各话。
+    assert.deepEqual(updates.list('u1', { groups: ['g3'] })[0]!.groups.map((entry) => entry.name), ['小说.奇幻.剑与魔法']);
+
+    now += 60_000;
+    const before = updates.list('u1').find((row) => row.bookId === a)!;
+    const marked = updates.configure('u1', a, { serialStatus: 'completed' })!;
+    assert.equal(marked.serialStatus, 'completed');
+    // 标记是读者的一句旁注，不是排期改动：不改下次检查时间，也不清失败计数。
+    assert.equal(marked.nextCheckAt, before.nextCheckAt);
+    assert.equal(marked.enabled, true);
+    assert.throws(() => updates.configure('u1', a, { serialStatus: 'finished' }), { code: 'BAD_REQUEST' });
+
+    assert.deepEqual(updates.list('u1', { serial: 'completed' }).map((row) => row.bookId), [a]);
+    assert.deepEqual(updates.list('u1', { serial: 'ongoing' }).map((row) => row.bookId), []);
+    // 「未完结」= 连载中 加上 还没有标记，也就是「滤掉已经完结的」。
+    assert.deepEqual(updates.list('u1', { serial: 'unfinished' }).map((row) => row.bookId), [b]);
+    assert.deepEqual(updates.list('u1', { serial: 'unfinished', groups: ['g3'] }), []);
+    updates.configure('u1', a, { serialStatus: null });
+    // 清掉标记后既不算连载中，也不算已完结，回到「未标记」。
+    assert.deepEqual(updates.list('u1', { serial: 'ongoing' }), []);
+    assert.deepEqual(updates.list('u1', { serial: 'completed' }), []);
+    assert.equal(updates.list('u1').find((row) => row.bookId === a)?.serialStatus, null);
     await updates.stop();
   } finally { f.db.close(); await rm(f.root, { recursive: true, force: true }); }
 });

@@ -107,8 +107,64 @@ async function installReaderApiStubs(page) {
     if (path.includes('/subscriptions')) body = { subscriptions: [] };
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
+  /*
+   * 追更列表, filtered the way the server filters it.
+   *
+   * The rows carry 连载状态 and 分组 so the review can see the two chips that make
+   * a long list readable: one marked 连载中, one unmarked, one 已完结 behind the
+   * default 「未完结」 filter.
+   */
+  await page.route('**/api/v1/subscriptions**', async route => {
+    const url = new URL(route.request().url());
+    const serial = url.searchParams.get('serial');
+    const groups = (url.searchParams.get('groups') ?? '').split(',').filter(Boolean);
+    const now = Date.now();
+    let rows = [
+      { bookId: 'b-follow-1', title: '剑与魔法与转生', enabled: true, intervalMinutes: 60, serialStatus: 'ongoing', nextCheckAt: now + 3_600_000, lastCheckAt: now - 1_800_000, lastSuccessAt: now - 1_800_000, lastError: null, newChapters: 2, groups: [{ id: 'g-sword', name: '小说.奇幻.剑与魔法' }] },
+      { bookId: 'b-follow-2', title: '异世界长篇', enabled: true, intervalMinutes: 360, serialStatus: null, nextCheckAt: now + 3_600_000, lastCheckAt: now - 3_600_000, lastSuccessAt: now - 3_600_000, lastError: null, newChapters: 0, groups: [{ id: 'g-isekai', name: '小说.-.异世界' }] },
+      { bookId: 'b-follow-3', title: '已经完结的科幻', enabled: false, intervalMinutes: 1440, serialStatus: 'completed', nextCheckAt: now, lastCheckAt: now, lastSuccessAt: now - 86_400_000, lastError: null, newChapters: 0, groups: [{ id: 'g-scifi', name: '科幻' }] },
+    ];
+    if (serial === 'ongoing') rows = rows.filter(row => row.serialStatus === 'ongoing');
+    else if (serial === 'completed') rows = rows.filter(row => row.serialStatus === 'completed');
+    else if (serial === 'unfinished') rows = rows.filter(row => row.serialStatus !== 'completed');
+    // Selecting a group means the whole subtree, as on the shelf.
+    const parentOf = { 'g-fantasy': 'g-novel', 'g-sword': 'g-fantasy', 'g-isekai': 'g-novel' };
+    const within = (group, root) => {
+      for (let current = group; current; current = parentOf[current]) if (current === root) return true;
+      return false;
+    };
+    if (groups.length > 0) rows = rows.filter(row => row.groups.some(group => groups.some(root => within(group.id, root))));
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ subscriptions: rows }) });
+  });
   await page.route('**/api/v1/plugins**', async route => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ plugins: [] }) });
+  });
+  // The reader's own shelf tree: two manual parents with a third level, plus a
+  // folder group (derived, read-only) so 分组管理 and the shelf's fold both have
+  // something to draw.
+  await page.route('**/api/v1/groups**', async route => {
+    if (route.request().method() !== 'GET') {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ group: null, defaultGroupId: null }) });
+      return;
+    }
+    const groups = [
+      { id: 'g-novel', name: '小说', level: 1, parentId: null, bookCount: 3, subtreeCount: 9, isDefault: false, kind: 'manual' },
+      { id: 'g-fantasy', name: '小说.奇幻', level: 2, parentId: 'g-novel', bookCount: 4, subtreeCount: 6, isDefault: false, kind: 'manual' },
+      { id: 'g-sword', name: '小说.奇幻.剑与魔法', level: 3, parentId: 'g-fantasy', bookCount: 2, subtreeCount: 3, isDefault: false, kind: 'manual' },
+      { id: 'g-sword-re', name: '小说.奇幻.剑与魔法.转生', level: 4, parentId: 'g-sword', bookCount: 1, subtreeCount: 1, isDefault: false, kind: 'manual' },
+      { id: 'g-sword-school', name: '小说.奇幻.剑与魔法.学院', level: 4, parentId: 'g-sword', bookCount: 1, subtreeCount: 1, isDefault: false, kind: 'manual' },
+      { id: 'g-sword-war', name: '小说.奇幻.剑与魔法.战争', level: 4, parentId: 'g-sword', bookCount: 1, subtreeCount: 1, isDefault: false, kind: 'manual' },
+      { id: 'g-sword-revenge', name: '小说.奇幻.剑与魔法.复仇', level: 4, parentId: 'g-sword', bookCount: 1, subtreeCount: 1, isDefault: false, kind: 'manual' },
+      { id: 'g-horror', name: '小说.恐怖', level: 2, parentId: 'g-novel', bookCount: 1, subtreeCount: 1, isDefault: false, kind: 'manual' },
+      // A tag created straight under a 大类: 「-」 is the skipped 篇幅 level.
+      { id: 'g-isekai', name: '小说.-.异世界', level: 3, parentId: 'g-novel', bookCount: 2, subtreeCount: 3, isDefault: false, kind: 'manual' },
+      { id: 'g-isekai-re', name: '小说.-.异世界.转生', level: 4, parentId: 'g-isekai', bookCount: 1, subtreeCount: 1, isDefault: false, kind: 'manual' },
+      { id: 'g-scifi', name: '科幻', level: 1, parentId: null, bookCount: 5, subtreeCount: 5, isDefault: false, kind: 'manual' },
+      { id: 'folder:故事', name: '故事', level: 1, parentId: null, bookCount: 0, subtreeCount: 7, isDefault: false, kind: 'folder' },
+      { id: 'folder:故事/长篇', name: '故事.长篇', level: 2, parentId: 'folder:故事', bookCount: 6, subtreeCount: 7, isDefault: false, kind: 'folder' },
+      { id: 'unfiled', name: '未分组', level: 1, parentId: null, bookCount: 4, subtreeCount: 4, isDefault: false, kind: 'unfiled' },
+    ];
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ groups }) });
   });
 }
 
@@ -215,6 +271,36 @@ async function runReaderReview(browser, origin, checks, errors) {
   await page.goto(`${origin}/#/sources`);
   await waitHeading(page, '书源');
   await capture(page, 'sources', checks, errors);
+  /*
+   * 自动追更: with a few hundred followed books the list needs the same two
+   * filters the shelf has — 连载状态 (the reader's own mark) and the four-level
+   * groups. The default 「未完结」 hides what the reader has marked 已完结 without
+   * hiding what they never marked.
+   */
+  await page.getByRole('tab', { name: '自动追更' }).click();
+  await page.locator('.follow-row').first().waitFor({ state: 'visible' });
+  assert.equal(await page.locator('.follow-row').count(), 2, 'the default filter hides 已完结');
+  assert.equal(await page.getByRole('button', { name: '未完结' }).getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.locator('.follow-serial.is-ongoing').count(), 1);
+  assert.ok(await page.locator('.follow-group').count() >= 1, 'a row says which groups it is filed into');
+  await capture(page, 'sources-follow', checks, errors);
+  // 一级组 chips come from the shelf's own tree (no book counts: those are the
+  // shelf's numbers, not this list's).
+  await page.getByRole('button', { name: '展开一级组' }).click();
+  await page.getByRole('button', { name: '小说', exact: true }).click();
+  await page.locator('.follow-row').first().waitFor({ state: 'visible' });
+  await capture(page, 'sources-follow-level1', checks, errors);
+  // 分组筛选: 二级 / 三级 / 四级, each with its own 或 / 与 / 非 — one component,
+  // shared with the shelf, so the sheet is the same panel on both screens.
+  await page.getByRole('button', { name: '分组筛选' }).click();
+  await page.locator('dialog.sheet').waitFor({ state: 'visible' });
+  await page.locator('[aria-label="小说.奇幻"]').click();
+  await page.locator('[aria-label="小说.奇幻.剑与魔法"]').click();
+  await capture(page, 'sources-follow-groups', checks, errors);
+  await page.getByRole('button', { name: '应用' }).click();
+  await page.locator('dialog.sheet').waitFor({ state: 'detached' }).catch(() => undefined);
+  assert.equal(await page.getByRole('button', { name: /分组：/ }).count(), 1, 'the 分组 chip counts the conditions');
+  await capture(page, 'sources-follow-filtered', checks, errors);
   // The reader is a lazily loaded chunk (app/router/lazy-pages.tsx): opening a book
   // must fetch it and render the chapter, not stop at the Suspense fallback.
   const readerChunk = page.waitForResponse(response => /\/assets\/ReaderPage-[\w-]+\.js$/.test(response.url()));
@@ -228,6 +314,48 @@ async function runReaderReview(browser, origin, checks, errors) {
   assert.equal(new URL(page.url()).hash, '#/shelf');
   await page.goForward();
   assert.equal(new URL(page.url()).hash, '#/library');
+  // 一级组 lives behind a fold: open it once so the review sees the chips (the
+  // reader's sections, the dashed folder groups and 未分组).
+  await page.goto(`${origin}/#/shelf`);
+  await page.getByRole('button', { name: '展开一级组' }).click();
+  await capture(page, 'shelf-level1', checks, errors);
+  // 分组 filter: each level (篇幅 / tag / tag 细分) has its own 或 / 与 / 非, and the
+  // levels intersect — that is the point of the sheet now.
+  await page.goto(`${origin}/#/shelf?groups=g-novel`);
+  await page.locator('.shelf-group').click();
+  await page.locator('[aria-label="小说.奇幻，6 本"]').click();
+  await page.locator('[aria-label="小说.奇幻.剑与魔法，3 本"]').click();
+  await page.locator('[aria-label="小说.奇幻.剑与魔法.转生，1 本"]').click();
+  await capture(page, 'shelf-group-modes', checks, errors);
+  await page.keyboard.press('Escape');
+  await page.locator('dialog.sheet').waitFor({ state: 'detached' }).catch(() => undefined);
+  // 书籍详情 fills a book into groups one level at a time — 大类, then the levels
+  // under it, with a tag's 四级标签 unfolding from its 「›」.
+  await page.locator('.book-card').first().click({ button: 'right' });
+  await page.locator('.sheet-list button').filter({ hasText: '书籍详情' }).click();
+  await capture(page, 'book-detail-groups', checks, errors);
+  // A tag with 四级标签 under it unfolds in place from its 「›」.
+  await page.locator('[aria-label="展开「剑与魔法」的 4 个四级标签"]').click();
+  await capture(page, 'book-detail-subgroups', checks, errors);
+  // 分组管理 is a second-level page with its own header and a scrolling list: a
+  // clipped scroller there passes a functional test and is unusable in a
+  // screenshot, which is why it is reviewed on its own.
+  await page.goto(`${origin}/#/shelf/groups`);
+  await waitHeading(page, '分组管理');
+  await capture(page, 'shelf-groups', checks, errors);
+  // The ⓘ bubble closes on `pointerleave` (that is what hovering means), and
+  // capture() resizes the viewport between shots — which counts as leaving. So it
+  // is opened once per width, and the shots are taken here rather than by capture().
+  for (const width of widths) {
+    await page.setViewportSize({ width, height: heightFor(width) });
+    await page.goto(`${origin}/#/shelf/groups`);
+    await waitHeading(page, '分组管理');
+    await page.getByRole('button', { name: '分组说明' }).hover();
+    await page.waitForTimeout(200);
+    const file = `shelf-groups-help-${width}.png`;
+    await page.screenshot({ path: join(output, file), fullPage: true });
+    checks.push({ name: 'shelf-groups-help', width, file });
+  }
   await context.close();
 }
 

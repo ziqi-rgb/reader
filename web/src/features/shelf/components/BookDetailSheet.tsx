@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Sheet } from '../../../ui/sheet.tsx';
 import { Callout } from '../../../ui/toolkit.tsx';
 import type { Book, BookGroup } from '../../../api/types.ts';
+import { groupBlocksUnder, groupChildren, groupPathLabel, groupRootOf, groupShortName, topLevelGroups } from '../groups.ts';
 
 /** What the sheet hands back on save; a `null` clears the field's override. */
 export interface BookMetadataDraft {
@@ -31,9 +32,15 @@ function formatSize(bytes: number): string {
  * too because it is embedded metadata the reader may have to correct, not because it
  * is a grouping dimension any more.
  *
+ * Groups are shown one level at a time, because a tree of four levels flattened into
+ * chips is unreadable: the top-level rows are a browser (which 大类 you are looking
+ * at) with a small ＋ that files the book into that 大类 itself, then the levels
+ * under it — 篇幅, tag, and the tag's own 细分, which unfold from a `›` on the tag
+ * chip rather than being drawn all at once.
+ *
  * Every field the reader has overridden by hand (`book.manualFields`) offers 撤销手改,
  * which falls back to whatever the file carries — that is the only way back once a
- * rescan has been overruled.
+ * rescan has overruled.
  */
 export function BookDetailSheet({ book, groups, busy, error, onSave, onClearField, onClose }: {
   book: Book;
@@ -49,11 +56,44 @@ export function BookDetailSheet({ book, groups, busy, error, onSave, onClearFiel
   const [description, setDescription] = useState(book.description ?? '');
   const [series, setSeries] = useState(book.series ?? '');
   const [index, setIndex] = useState(book.seriesIndex == null ? '' : String(book.seriesIndex));
-  const [selected, setSelected] = useState<string[]>(() => (book.groups ?? []).map(group => group.id));
+  const [selected, setSelected] = useState<string[]>(() => (book.groups ?? [])
+    // A folder group describes the file layout, so it is shown but never written.
+    .filter(group => group.kind !== 'folder' && group.kind !== 'unfiled')
+    .map(group => group.id));
   const manual = new Set(book.manualFields ?? []);
+  const folderGroups = (book.groups ?? []).filter(group => group.kind === 'folder');
   const toggle = (id: string) => setSelected(current => (current.includes(id)
     ? current.filter(value => value !== id)
     : [...current, id]));
+
+  const level1 = useMemo(() => topLevelGroups(groups), [groups]);
+  /** Which 大类 the sheet is showing; a book may still belong to several. */
+  const [activeRootId, setActiveRootId] = useState<string | null>(() => {
+    for (const ref of book.groups ?? []) {
+      if (ref.kind === 'folder' || ref.kind === 'unfiled') continue;
+      const root = groupRootOf(groups, ref.id);
+      if (root) return root.id;
+    }
+    return null;
+  });
+  /** Tags whose 四级 children are unfolded; a chosen 四级 opens its tag on load. */
+  const [expanded, setExpanded] = useState<Set<string>>(() => {
+    const open = new Set<string>();
+    for (const ref of book.groups ?? []) {
+      const group = groups.find(entry => entry.id === ref.id);
+      if (group && group.level === 4 && group.parentId) open.add(group.parentId);
+    }
+    return open;
+  });
+  const toggleExpanded = (id: string) => setExpanded(current => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const activeRoot = level1.find(group => group.id === activeRootId) ?? level1[0];
+  const blocks = activeRoot
+    ? groupBlocksUnder(groups, activeRoot.id)
+    : { second: [], third: [], fourth: [] };
 
   return <Sheet
     title={book.title || '书籍详情'}
@@ -96,15 +136,77 @@ export function BookDetailSheet({ book, groups, busy, error, onSave, onClearFiel
       </div>
 
       <div className="sheet-field">
-        <label>分组<span className="muted">（可多选；和文件里的系列、标签无关）</span></label>
+        <label>分组<span className="muted">（可多选；点名字换一个类看，点 ＋ 直接归到这个类）</span></label>
         {groups.length === 0
           ? <p className="sheet-text muted">还没有分组。</p>
-          : <div className="chip-row" role="group" aria-label="选择分组">
-            {groups.map(group => <button key={group.id} type="button" className="chip" aria-pressed={selected.includes(group.id)}
-              aria-label={`${group.name}，${group.bookCount} 本`}
-              disabled={busy} onClick={() => toggle(group.id)}>{group.name}</button>)}
-          </div>}
+          : <>
+            <div className="chip-row" role="group" aria-label="一级分组">
+              {level1.map(group => {
+                const chosen = selected.includes(group.id);
+                return <span key={group.id} className="chip-split">
+                  <button type="button" className="chip-split-main" aria-pressed={activeRoot?.id === group.id}
+                    aria-label={`查看「${group.name}」下的分组`}
+                    onClick={() => setActiveRootId(group.id)}>{group.name}</button>
+                  <button type="button" className="chip-split-tail" aria-pressed={chosen}
+                    aria-label={chosen ? `把书从「${group.name}」移出` : `把书放进「${group.name}」`}
+                    disabled={busy} onClick={() => toggle(group.id)}>{chosen ? '✓' : '＋'}</button>
+                </span>;
+              })}
+            </div>
+            {activeRoot && <div className="book-detail-groups">
+              <p className="sheet-text muted">「{groupPathLabel(activeRoot.name)}」下的标签</p>
+              {blocks.second.length > 0 && <div className="sheet-field">
+                <label>二级组<span className="muted">（篇幅，可不选）</span></label>
+                <div className="chip-row" role="group" aria-label="二级组">
+                  {blocks.second.map(group => <button key={group.id} type="button" className="chip"
+                    aria-pressed={selected.includes(group.id)} disabled={busy}
+                    aria-label={`${groupPathLabel(group.name)}，${group.bookCount} 本`}
+                    onClick={() => toggle(group.id)}>{groupShortName(group.name)}</button>)}
+                </div>
+              </div>}
+              {blocks.third.length > 0 && <div className="sheet-field">
+                <label>三级组<span className="muted">（tag）</span></label>
+                {(() => {
+                  const closed = blocks.third.filter(group => !expanded.has(group.id));
+                  const open = blocks.third.filter(group => expanded.has(group.id));
+                  const chip = (group: BookGroup) => {
+                    const children = groupChildren(groups, group.id);
+                    const unfolded = expanded.has(group.id);
+                    return <span key={group.id} className="chip-split">
+                      <button type="button" className="chip-split-main" aria-pressed={selected.includes(group.id)}
+                        disabled={busy} aria-label={`${groupPathLabel(group.name)}，${group.bookCount} 本`}
+                        onClick={() => toggle(group.id)}>{groupShortName(group.name)}</button>
+                      {children.length > 0 && <button type="button" className="chip-split-tail" aria-expanded={unfolded}
+                        aria-label={`${unfolded ? '收起' : '展开'}「${groupShortName(group.name)}」的 ${children.length} 个四级标签`}
+                        disabled={busy} onClick={() => toggleExpanded(group.id)}>{unfolded ? '‹' : '›'}</button>}
+                    </span>;
+                  };
+                  return <>
+                    {closed.length > 0 && <div className="chip-row" role="group" aria-label="三级组">
+                      {closed.map(chip)}
+                    </div>}
+                    {/* An unfolded tag takes a row of its own: its 四级标签 sit beside it,
+                      * parted by rules, and wrap onto another line when the row fills up. */}
+                    {open.map(group => <div key={group.id} className="book-detail-tag-row">
+                      {chip(group)}
+                      <div className="book-detail-subtags" role="group" aria-label={`「${groupShortName(group.name)}」的四级组`}>
+                        {groupChildren(groups, group.id).map(child => <button key={child.id} type="button"
+                          className="book-detail-subtag" aria-pressed={selected.includes(child.id)} disabled={busy}
+                          aria-label={`${groupPathLabel(child.name)}，${child.bookCount} 本`}
+                          onClick={() => toggle(child.id)}>{groupShortName(child.name)}</button>)}
+                      </div>
+                    </div>)}
+                  </>;
+                })()}
+              </div>}
+            </div>}
+          </>}
       </div>
+
+      {folderGroups.length > 0 && <div className="sheet-field">
+        <label>文件夹分组<span className="muted">（按文件所在目录自动生成，不可修改）</span></label>
+        <p className="sheet-text">{folderGroups.map(group => groupPathLabel(group.name)).join('、')}</p>
+      </div>}
 
       <div className="sheet-field">
         <label htmlFor="book-detail-series">丛书（文件内嵌）<span className="muted">（留空表示没有丛书）</span></label>

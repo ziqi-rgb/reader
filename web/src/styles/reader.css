@@ -1782,6 +1782,34 @@ book-content {
   background: var(--reader-fill);
 }
 
+/* ---- server cache badge ----
+ *
+ * Its own layer on the card, top-right, and `pointer-events: none` on purpose:
+ * the ⋯ menu already owns that corner (see the `.series-toggle` note above — a
+ * badge placed on top of it once made the card's only menu unreachable). The badge
+ * is shifted in from the corner so the two glyphs never overlap, and it stays
+ * out of the cover entirely, where the format badge and the progress bar live.
+ */
+.book-card .server-cache-badge {
+  position: absolute;
+  inset-block-start: 0.3rem;
+  inset-inline-end: 2.15rem;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.28);
+  pointer-events: none;
+}
+.book-card .server-cache-badge .server-cache-disc { fill: var(--color-line); }
+.book-card .server-cache-badge .server-cache-ring { stroke: var(--color-ok); }
+.book-card .server-cache-badge .server-cache-tick { stroke: #fff; }
+.book-card .server-cache-badge[data-done="true"] .server-cache-disc { fill: var(--color-ok); }
+
 /* ---- continue reading: removed, on purpose ----
  *
  * There used to be a horizontal 继续阅读 row above the grid here: ten cards, the same
@@ -3679,6 +3707,18 @@ book-content {
 .sources-row small { display:block; margin-top:.35rem; opacity:.75; }
 .source-interval { display:inline-flex !important; flex-direction:row !important; align-items:center; gap:.45rem !important; margin:0 !important; color:var(--reader-muted); font-size:var(--text-label); }
 .source-interval select { min-height:40px !important; width:auto !important; padding:.45rem .55rem !important; }
+/* 追更: 连载状态和分组是列表上方的两个筛子。书多了以后，追更列表和书架需要同样的
+   筛选入口，所以筛选行直接复用书架那套 chip 与分组栏的样式。 */
+.follow-filters { flex-wrap:wrap; gap:var(--space-2); margin:1rem 0 .75rem; overflow:visible; }
+.follow-count { margin:.25rem 0 .5rem; font-size:var(--text-label); }
+/* 连载状态是一句旁注，不是标签的分类：画在书名后面，未标记时也占位，读者才知道可以标。 */
+.follow-serial { display:inline-block; margin-left:.5rem; padding:.05rem .45rem; border:1px solid var(--reader-line);
+  border-radius:var(--radius-pill); color:var(--reader-muted); font-size:var(--text-meta); font-weight:500; vertical-align:middle; }
+.follow-serial.is-ongoing { border-color:color-mix(in srgb,var(--reader-accent) 45%,transparent); background:var(--color-brand-soft); color:var(--reader-accent); }
+.follow-serial.is-completed { opacity:.7; }
+.follow-groups { display:flex; flex-wrap:wrap; gap:.35rem; margin-top:.5rem; }
+.follow-group { padding:.05rem .45rem; border:1px dashed var(--reader-line); border-radius:var(--radius-pill);
+  color:var(--reader-muted); font-size:var(--text-meta); overflow-wrap:anywhere; }
 .source-catalog-actions { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; margin:.5rem 0 1rem; }
 .source-navigation { flex-wrap:wrap; margin:.5rem 0 1rem; }
 .library-files-screen .manager-status { padding:.65rem 1rem 1rem; }
@@ -3699,13 +3739,18 @@ book-content {
 .search-split { display:flex; position:relative; flex:none; }
 .search-split > .primary:first-child { border-radius:var(--reader-radius) 0 0 var(--reader-radius); }
 .search-split > .primary:only-child { border-radius:var(--reader-radius); }
-.search-split .search-menu-toggle { border-radius:0 var(--reader-radius) var(--reader-radius) 0; padding-inline:.65rem; border-left:1px solid var(--reader-line); }
-.search-menu-toggle .icon { transform:rotate(90deg); }
-.search-menu { position:absolute; right:0; top:calc(100% + .45rem); z-index:5; width:min(17rem, calc(100vw - 4rem)); padding:.35rem; border:1px solid var(--reader-line); border-radius:var(--radius-md); background:var(--reader-paper); box-shadow:0 8px 24px #0002; }
-.search-menu button { display:flex; align-items:center; width:100%; padding:.65rem .75rem; text-align:left; border:0; background:transparent; color:var(--reader-ink); border-radius:var(--radius-sm); }
-.search-menu button:focus-visible { background:color-mix(in srgb, var(--reader-accent) 12%, transparent); }
-@media (hover: hover) and (pointer: fine) { .search-menu button:hover { background:color-mix(in srgb, var(--reader-accent) 12%, transparent); }}
-.search-menu small { display:block; margin-top:.2rem; color:var(--reader-muted); font-size:var(--text-meta); }
+/* The split button's second half is the ActionMenu trigger: it keeps the primary colour
+   and the button's own height, so the two halves read as one control. */
+.search-split > .search-menu-toggle {
+  width:auto; height:auto; min-width:44px; min-height:44px; padding-inline:.65rem;
+  border-radius:0 var(--reader-radius) var(--reader-radius) 0;
+  border:1px solid var(--reader-primary);
+  border-left-color:color-mix(in srgb,var(--reader-on-primary) 30%,transparent);
+  background:var(--reader-primary); color:var(--reader-on-primary);
+}
+.search-split > .search-menu-toggle:active,
+.search-split > .search-menu-toggle[aria-expanded='true'] { background:color-mix(in srgb,var(--reader-primary) 82%,#000); }
+.search-split > .search-menu-toggle .icon { transform:rotate(90deg); }
 .catalog-summary { display:flex; flex-wrap:wrap; gap:.5rem 1rem; justify-content:space-between; align-items:center; }
 .catalog-summary strong { font-size:var(--text-title); }
 .catalog-summary span { display:flex; align-items:center; gap:.4rem; color:var(--reader-muted); font-size:var(--text-ui); }
@@ -4069,6 +4114,22 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
 .catalog-book:has(.catalog-source-count) { display: flex; align-items: center; gap: 1rem; }
 .catalog-book:has(.catalog-source-count) > div { flex: 1; min-width: 0; }
 .catalog-source-count { display: inline-flex; align-items: center; gap: .5rem; flex: none; min-height: 44px; white-space: nowrap; }
+/* "已在书架": a state, not a control — inline beside the title so the row's
+ * buttons can stay what they are (详情 + 去阅读). */
+.catalog-owned {
+  display: inline-flex;
+  align-items: center;
+  margin-inline-start: .45rem;
+  padding: .05rem .45rem;
+  border-radius: var(--radius-pill);
+  background: var(--color-ok-soft);
+  color: var(--color-ok);
+  font-size: var(--text-micro);
+  font-weight: 520;
+  line-height: 1.6;
+  white-space: nowrap;
+  vertical-align: middle;
+}
 .catalog-source-heading { padding-block: 1rem; border-bottom: 1px solid var(--reader-line); }
 .catalog-source-heading h3 { margin: 0; font-size: var(--text-title); overflow-wrap: anywhere; }
 .catalog-source-heading p { margin: .4rem 0; color: var(--reader-muted); }
@@ -4185,11 +4246,7 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
 .source-capabilities dl > div { padding: 8px; border: 1px solid currentColor; border-radius: var(--radius-sm); }
 .source-capabilities dd { margin: 4px 0 0; }
 
-/* Align split search actions and source filtering controls. */
-.search-menu button { display:grid; grid-template-columns:2rem minmax(0,1fr); align-items:center; column-gap:.65rem; }
-.search-menu button > .icon { width:2rem; height:2rem; display:grid; place-items:center; }
-.search-menu button > span { min-width:0; line-height:1.35; }
-.search-menu small { line-height:1.4; }
+/* Align source filtering controls. */
 .catalog-source-meta { display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-top:.75rem; }
 .catalog-source-search { display:block; flex:1 1 16rem; max-width:22rem; }
 .catalog-source-search input { width:100%; min-height:42px; box-sizing:border-box; padding:.6rem .8rem; border:1px solid var(--reader-line); border-radius:var(--radius-md); background:var(--reader-paper); color:var(--reader-ink); }
@@ -4220,8 +4277,76 @@ svg.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; verti
  */
 .chip-row { display: flex; flex-wrap: wrap; gap: var(--space-1); min-width: 0; }
 .chip-row .chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: start; }
+/*
+ * 书籍详情 fills a book into groups one level at a time: a split chip is
+ * 「name | tail」, where the tail files the book into that group (an 一级组) or
+ * unfolds its children (a 三级组 with 四级标签 under it).
+ */
+.chip-split {
+  display: inline-flex; align-items: stretch; max-width: 100%;
+  border: 1px solid var(--color-line); border-radius: var(--radius-pill);
+  background: var(--color-surface); overflow: hidden;
+}
+.chip-split-main {
+  min-width: 0; padding: .25rem .6rem; border: 0; background: transparent;
+  color: var(--color-ink); font: inherit; font-size: var(--text-ui); cursor: pointer;
+  white-space: normal; overflow-wrap: anywhere; text-align: start;
+}
+.chip-split-main[aria-pressed='true'] { background: var(--color-brand-soft); color: var(--reader-accent); font-weight: 600; }
+.chip-split-tail {
+  flex: none; display: grid; place-items: center; padding: 0 .5rem;
+  border: 0; border-inline-start: 1px solid var(--color-line); background: transparent;
+  color: var(--color-muted); font: inherit; font-size: var(--text-meta); cursor: pointer;
+}
+.chip-split-tail[aria-pressed='true'] { background: var(--color-brand-soft); color: var(--reader-accent); font-weight: 600; }
+.chip-split-main:focus-visible, .chip-split-tail:focus-visible { outline: 2px solid var(--reader-accent); outline-offset: -2px; }
+@media (hover: hover) and (pointer: fine) {
+  .chip-split-main:hover:not([aria-pressed='true']) { background: var(--color-surface-2); }
+  .chip-split-tail:hover:not([aria-pressed='true']) { background: var(--color-surface-2); }
+}
+/* A level's 或 / 与 / 非 sits under its own chips, quieter than the choice above it. */
+.sheet-mode-row { margin-block-start: .35rem; }
+.sheet-mode-row .chip { font-size: var(--text-meta); padding: .15rem .5rem; }
+
+/* A tag's 细分: the unfolded tag takes a row of its own, its children sit beside
+ * it parted by rules, and they wrap when the row runs out of room. */
+.book-detail-tag-row {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--space-1) var(--space-2); min-width: 0;
+}
+.book-detail-subtags { display: flex; flex-wrap: wrap; align-items: baseline; flex: 1 1 auto; min-width: 0; }
+.book-detail-subtag {
+  padding: 0; border: 0; background: none; color: var(--color-muted);
+  font: inherit; font-size: var(--text-ui); cursor: pointer;
+}
+.book-detail-subtag + .book-detail-subtag {
+  margin-inline-start: .55rem; padding-inline-start: .55rem;
+  border-inline-start: 1px solid var(--color-line);
+}
+.book-detail-subtag[aria-pressed='true'] { color: var(--reader-accent); font-weight: 600; }
+.book-detail-subtag:focus-visible { outline: 2px solid var(--reader-accent); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) {
+  .book-detail-subtag:hover { color: var(--color-ink); }
+}
+.book-detail-groups { display: grid; gap: var(--space-2); }
 .shelf-filters .chip[aria-pressed='true'] { background: var(--color-brand-soft); border-color: transparent; color: var(--reader-accent); font-weight: 600; }
-.shelf-filters .shelf-group, .shelf-filters .shelf-group-active { margin-inline-start: auto; flex: none; white-space: nowrap; }
+.shelf-filters .shelf-group, .shelf-filters .shelf-group-active { flex: none; white-space: nowrap; }
+/*
+ * 一级组 lives here: the default 分组 button is pushed to the right edge, and the
+ * top-level buttons appear to its left once the fold is opened. Collapsed by
+ * default because a reader with a dozen sections would otherwise see no books.
+ */
+.shelf-group-bar { display: flex; align-items: center; gap: var(--space-1); margin-inline-start: auto; min-width: 0; }
+.shelf-group-fold { flex: none; padding-inline: .4rem; }
+.shelf-level1 { flex-wrap: nowrap; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.shelf-level1::-webkit-scrollbar { display: none; }
+.shelf-level1 .chip { white-space: nowrap; }
+.shelf-level1-empty { font-size: var(--text-meta); white-space: nowrap; }
+/* Folder groups come from the files, not from the reader: dashed, never renamed. */
+.shelf-filters .chip[data-kind='folder'] { border-style: dashed; }
+/* 未分组 is the absence of a group: same treatment, plus muted ink so it does not
+ * read as one of the reader's own sections. */
+.shelf-filters .chip[data-kind='unfiled'] { border-style: dashed; color: var(--color-muted); }
 .book-card .book-state {
   position: absolute;
   inset-block-start: 0.35rem;

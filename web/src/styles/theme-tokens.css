@@ -268,9 +268,9 @@
 
 
 /* Status colours: not part of a theme, only of light or dark. */
-:root, [data-mode="light"] { --color-danger: #943C32; --color-danger-soft: #A4504515; }
-[data-mode="dark"] { --color-danger: #F4A89D; --color-danger-soft: #F49A8C18; }
-@media (prefers-color-scheme: dark) { :root:not([data-mode]) { --color-danger: #F4A89D; --color-danger-soft: #F49A8C18; } }
+:root, [data-mode="light"] { --color-danger: #943C32; --color-danger-soft: #A4504515; --color-ok: #2F7D4F; --color-ok-soft: #2F7D4F1F; }
+[data-mode="dark"] { --color-danger: #F4A89D; --color-danger-soft: #F49A8C18; --color-ok: #55A874; --color-ok-soft: #55A87424; }
+@media (prefers-color-scheme: dark) { :root:not([data-mode]) { --color-danger: #F4A89D; --color-danger-soft: #F49A8C18; --color-ok: #55A874; --color-ok-soft: #55A87424; } }
 
 /*
  * Older token names, re-declared wherever a theme is (so a container with its own

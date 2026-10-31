@@ -1,6 +1,8 @@
 import type { Db } from '../db/index.ts';
 import { applyOverrides, type BaseMetadata } from './merge.ts';
 import { groupsOfBooks, type BookGroupRef } from './groups.ts';
+import { folderGroupsOfBooks } from './folder-groups.ts';
+import { escapeLike, groupCondition, groupFilterConditions } from './group-filter.ts';
 import { safeJsonParse } from '../lib/text.ts';
 import { badRequest, notFound } from '../lib/errors.ts';
 
@@ -170,14 +172,25 @@ export interface ListOptions {
   /**
    * Reader-owned group ids (see `GroupService`), combined by `groupMode`.
    *
-   * Groups are the only grouping dimension: `series` and `tags` come from the file,
-   * so filtering by them was really filtering by whatever the source file happened
-   * to carry.
+   * A selected group means it *and every group below it*: 「小说」 is that whole
+   * section of the shelf, 「小说.奇幻」 is one part of it. Groups are the only
+   * grouping dimension: `series` and `tags` come from the file, so filtering by
+   * them was really filtering by whatever the source file happened to carry.
    */
   groups?: string[];
   /**
-   * How several selected groups combine:
-   * `or` — in any of them, `and` — in all of them, `not` — in none of them.
+   * How the selected groups combine, **per level**.
+   *
+   * 二级, 三级 and 四级 are different dimensions (篇幅, tag, tag 细分), so each has
+   * its own 或 / 与 / 非 and the levels are AND-ed together: 「或: 长篇」 and
+   * 「或: 奇幻、恐怖」 means "长篇, and (奇幻 or 恐怖)" — not one flat list. A level
+   * with nothing selected does not take part; the top-level group is always a
+   * plain AND condition and has no mode of its own.
+   */
+  groupModes?: Partial<Record<2 | 3 | 4, 'or' | 'and' | 'not'>>;
+  /**
+   * The one-mode filter of older clients: used as the default for every level that
+   * did not name a mode of its own.
    */
   groupMode?: 'or' | 'and' | 'not';
   page?: number;
@@ -185,25 +198,13 @@ export interface ListOptions {
 }
 
 /**
- * Escapes the two characters `LIKE` treats specially.
- *
- * `%` and `_` are legal in a filename and both are wildcards; a folder called
- * `100%` would otherwise match `1000 books` as well. The escape character itself
- * has to be escaped first, or escaping `%` would produce `\\%` which then means a
- * literal backslash followed by any run.
+ * Books with a live file, managed download or account-owned chapter snapshot.
+ * A missing local file disappears while its progress survives for a restore;
+ * a disabled plugin leaves already acquired chapters on the shelf.
  */
-function escapeLike(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
-}
-
 export class ShelfService {
   constructor(private readonly db: Db) {}
 
-  /**
-   * Books with a live file, managed download or account-owned chapter snapshot.
-   * A missing local file disappears while its progress survives for a restore;
-   * a disabled plugin leaves already acquired chapters on the shelf.
-   */
   list(userId: string, options: ListOptions = {}): { items: BookDto[]; total: number; page: number; pageSize: number } {
     const page = Math.max(1, options.page ?? 1);
     const pageSize = Math.min(200, Math.max(1, options.pageSize ?? 50));
@@ -253,8 +254,13 @@ export class ShelfService {
     }
 
     if (options.search) {
-      where.push(`(${effectiveField('title')} LIKE ? OR ${effectiveField('author')} LIKE ? OR ${effectiveField('series')} LIKE ? OR b.isbn = ?)`);
-      const like = `%${options.search}%`;
+      /*
+       * `%` and `_` are wildcards, and a reader may well type them: a book called
+       * `100%` or `A_B` would otherwise match every title on the shelf. `:` and the
+       * other punctuation are literal in LIKE, so only these two need escaping.
+       */
+      where.push(`(${effectiveField('title')} LIKE ? ESCAPE '\\' OR ${effectiveField('author')} LIKE ? ESCAPE '\\' OR ${effectiveField('series')} LIKE ? ESCAPE '\\' OR b.isbn = ?)`);
+      const like = `%${escapeLike(options.search)}%`;
       params.push(like, like, like, options.search);
     }
     if (options.author) {
@@ -272,36 +278,18 @@ export class ShelfService {
     if (options.tag) {
       // Tags are stored as a JSON array; substring matching is sufficient here
       // and avoids a join table that would complicate the sync payload.
-      where.push('b.tags LIKE ?');
-      params.push(`%"${options.tag}"%`);
+      where.push(`b.tags LIKE ? ESCAPE '\\'`);
+      params.push(`%"${escapeLike(options.tag)}"%`);
     }
     /*
-     * Group filter — the reader's own structure, so the account id is part of the
-     * predicate rather than a join the caller could forget: a group row belongs to
-     * one account and a book may be in several at once.
-     *
-     * `or` / `and` / `not` are the three questions a reader actually asks: "these
-     * groups", "the books in all of them", "what I have not filed here yet".
+     * Group filter — the reader's own structure. The predicate itself lives in
+     * `group-filter.ts`, because 追更 filters the same way: a chip has to mean
+     * one thing everywhere it appears.
      */
     if (options.groups && options.groups.length > 0) {
-      const mode = options.groupMode ?? 'or';
-      if (mode !== 'or' && mode !== 'and' && mode !== 'not') throw badRequest('invalid group mode');
-      const ids = [...new Set(options.groups)];
-      const placeholders = ids.map(() => '?').join(',');
-      const member = `SELECT 1 FROM book_group_members gm JOIN book_groups g ON g.id = gm.group_id
-         WHERE gm.book_id = b.id AND g.user_id = ? AND g.id`;
-      if (mode === 'and') {
-        for (const id of ids) {
-          where.push(`EXISTS (${member} = ?)`);
-          params.push(userId, id);
-        }
-      } else if (mode === 'not') {
-        where.push(`NOT EXISTS (${member} IN (${placeholders}))`);
-        params.push(userId, ...ids);
-      } else {
-        where.push(`EXISTS (${member} IN (${placeholders}))`);
-        params.push(userId, ...ids);
-      }
+      const filter = groupFilterConditions(this.db, userId, options, 'b.id');
+      where.push(...filter.where);
+      params.push(...filter.params);
     }
     if (options.path) {
       /*
@@ -431,8 +419,42 @@ export class ShelfService {
   /** Fills `BookDto.groups` for a batch of books in one query. */
   private attachGroups(userId: string, items: BookDto[]): void {
     if (items.length === 0) return;
-    const byBook = groupsOfBooks(this.db, userId, items.map((item) => item.id));
-    for (const item of items) item.groups = byBook.get(item.id) ?? [];
+    const ids = items.map((item) => item.id);
+    const byBook = groupsOfBooks(this.db, userId, ids);
+    // Folder groups are read-only and derived from the files, so they are merged
+    // here rather than stored: 书籍详情 can show 「故事.长篇」 as a label while
+    // 保存 only writes the reader's own groups.
+    const folders = folderGroupsOfBooks(this.db, ids);
+    for (const item of items) {
+      item.groups = [...(byBook.get(item.id) ?? []), ...(folders.get(item.id) ?? [])];
+    }
+  }
+
+  /**
+   * How many shelf books a filter value stands for.
+   *
+   * The merged chip reports a union: a book filed by hand in 「R18」 that also
+   * lives in the 「R18」 folder is one book, not two.
+   */
+  countGroupFilter(userId: string, values: readonly string[]): number {
+    const owned = this.db.all<{ id: string; name: string }>(
+      'SELECT id, name FROM book_groups WHERE user_id = ?', userId,
+    );
+    const conditions: string[] = [];
+    const params: Array<string | number> = [];
+    for (const value of values) {
+      const condition = groupCondition(userId, owned, value, 'ub.book_id');
+      if (!condition) continue;
+      conditions.push(condition.sql);
+      params.push(...condition.params);
+    }
+    if (conditions.length === 0) return 0;
+    const row = this.db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM user_books ub
+        WHERE ub.user_id = ? AND ub.hidden = 0 AND (${conditions.join(' OR ')})`,
+      userId, ...params,
+    );
+    return row?.n ?? 0;
   }
 
   /**

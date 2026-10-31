@@ -4,3 +4,7 @@
 **/.gradle
 data
 .git
+# 部署产物（docker save 出来的镜像归档）不进构建上下文：一个 1 GB 的 tar
+# 会让每次 build 先把整份上下文传一遍。
+*.tar
+artifacts

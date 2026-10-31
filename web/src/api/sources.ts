@@ -12,6 +12,14 @@ export interface SourceEntry {
   latestChapter?: string; sourceName?: string; coverUrl?: string;
   ref: string; title: string; authors?: string[]; description?: string;
   options?: Array<{ id: string; label: string; available?: boolean }>;
+  /**
+   * The book this entry already became, when it is on this reader's shelf.
+   *
+   * Matched by `(source instance, entry ref)` on the server. There is deliberately
+   * no attempt to recognise "the same novel from another source": entry ids are
+   * each site's own, and a title+author guess would quietly point at the wrong book.
+   */
+  bookId?: string;
 }
 export interface SourcePage {
   limitReached?: boolean;
@@ -29,10 +37,23 @@ export interface SourcePlugin {
   pluginId: string; builtin: boolean; name?: string; version?: string; folder?: string; enabled: boolean;
   runtime?: { state: string } | null; error?: { code: string; message: string };
 }
+/**
+ * 连载状态 as the reader marks it by hand (`null` = 还没有标记).
+ *
+ * Not inferred from the source: a directory does not say whether a book is
+ * finished, and "no new chapters lately" is the same thing whether the book ended
+ * or the author is taking a break.
+ */
+export type SerialStatus = 'ongoing' | 'completed';
+/** `unfinished` is 连载中 plus 未标记 — i.e. "hide the ones I am done with". */
+export type SerialFilter = 'ongoing' | 'completed' | 'unfinished';
 export interface ChapterSubscription {
   bookId: string; title: string; enabled: boolean; intervalMinutes: number;
+  serialStatus: SerialStatus | null;
   nextCheckAt: number; lastCheckAt: number | null; lastSuccessAt: number | null;
   lastError: string | null; newChapters: number;
+  /** The reader's own groups this book is filed into, for the row's 分组 labels. */
+  groups?: Array<{ id: string; name: string }>;
 }
 
 export interface ExtensionField {

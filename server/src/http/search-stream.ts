@@ -5,6 +5,21 @@ import type { CatalogPage, SearchRequest } from '../sources/types.ts';
 import type { SourceHost } from '../services/source-host.ts';
 
 const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+
+/**
+ * Attach "the book this entry already became" to catalog entries.
+ *
+ * Shared by the search stream and the browse page: the browser draws the same row
+ * either way, so both have to answer the same question the same way. Matching is
+ * `(source instance, entry ref)`, the only identity an entry has — see
+ * `SourceHost.ownedEntries`.
+ */
+export function annotateOwnership<T extends { ref: string }>(items: readonly T[], owned: ReadonlyMap<string, string>): T[] {
+  return items.map((entry) => {
+    const bookId = owned.get(entry.ref);
+    return bookId ? { ...entry, bookId } : entry;
+  });
+}
 interface Connection { controller: AbortController; closed: Promise<void> }
 const connections = new WeakMap<SourceHost, Map<string, Connection>>();
 
@@ -29,6 +44,9 @@ export function searchResponse(request: FastifyRequest, reply: FastifyReply, hos
     let cursor = search.cursor, previous: CatalogPage['batch'], complete = false;
     const seen = new Set<string>(), refs = new Set<string>();
     const limit = search.resultLimit ?? 10000;
+    // Read once per stream: a search is a snapshot, and re-reading the shelf on
+    // every page would let the answer change under the reader's eyes.
+    const owned = host.ownedEntries(userId, sourceId);
     try {
       yield ': search connected\n\n';
       // A resumed stream must not race the previous connection's session stop.
@@ -44,10 +62,10 @@ export function searchResponse(request: FastifyRequest, reply: FastifyReply, hos
           throw new AppError(502, 'INVALID_PROGRESS', '来源搜索进度异常');
         }
         previous = page.batch;
-        const items = page.items.filter(entry => {
+        const items = annotateOwnership(page.items.filter(entry => {
           if (refs.has(entry.ref) || refs.size >= limit) return false;
           refs.add(entry.ref); return true;
-        });
+        }), owned);
         const capped = refs.size >= limit;
         pages++; resultCount = refs.size; lastEventAt = Date.now();
         const result = { ...page, items, ...(capped ? { nextCursor: undefined, limitReached: true } : {}) };

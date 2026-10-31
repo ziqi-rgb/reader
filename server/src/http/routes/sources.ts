@@ -5,10 +5,12 @@ import { authenticate, currentUser, requireAdmin } from '../auth.ts';
 import { badRequest } from '../../lib/errors.ts';
 import { SourceHost } from '../../services/source-host.ts';
 import { withSignal } from '../request-signal.ts';
-import { searchResponse } from '../search-stream.ts';
+import { searchResponse, annotateOwnership } from '../search-stream.ts';
 import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { PluginInstaller, PLUGIN_UPLOAD_LIMIT } from '../../sources/plugin-installer.ts';
+import { groupFilterFromQuery } from '../../services/group-filter.ts';
+import { SERIAL_FILTERS, type SerialFilter } from '../../services/chapter-updates.ts';
 import JSZip from 'jszip';
 
 /**
@@ -68,7 +70,28 @@ export function registerSourceRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.addHook('onReady', async () => { await host.plugins.loadInstalled(); host.updates.start(); host.plugins.startTasks(); });
   app.addHook('onClose', async () => { await host.updates.stop(); await host.plugins.close(); });
 
-  app.get('/api/v1/subscriptions', { preHandler: auth }, async (request) => ({ subscriptions: host.updates.list(currentUser(request).id) }));
+  /**
+   * The reader's followed books, narrowed like the shelf.
+   *
+   * `groups` / `groupMode2..4` are the shelf's own four-level selection and
+   * `serial` is the hand-marked 连载状态. Both exist because a large 追更 list is
+   * unreadable as a flat list, and "what is still updating in 小说.奇幻" is the
+   * question the page exists to answer.
+   */
+  app.get('/api/v1/subscriptions', { preHandler: auth }, async (request) => {
+    const user = currentUser(request);
+    const query = request.query as Record<string, string | undefined>;
+    const serial = query.serial;
+    if (serial !== undefined && !SERIAL_FILTERS.includes(serial as SerialFilter)) {
+      throw badRequest(`serial must be one of ${SERIAL_FILTERS.join(', ')}`);
+    }
+    return {
+      subscriptions: host.updates.list(user.id, {
+        ...groupFilterFromQuery(query),
+        ...(serial ? { serial: serial as SerialFilter } : {}),
+      }),
+    };
+  });
   app.patch('/api/v1/books/:id/subscription', { preHandler: auth }, async (request) => {
     const user = currentUser(request); const { id } = request.params as { id: string };
     ctx.shelf.get(user.id, id);
@@ -125,9 +148,14 @@ export function registerSourceRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.get('/api/v1/sources/:id/browse', { preHandler: auth }, async (request, reply) => {
     const user = currentUser(request); const { id } = request.params as { id: string };
     const q = request.query as { ref?: string; cursor?: string; limit?: string };
-    return withSignal(request, reply, (signal) => host.browse(user.id, id, {
-      ref: parameter(q.ref, 'ref'), cursor: parameter(q.cursor, 'cursor'), limit: pageLimit(q.limit),
-    }, signal));
+    return withSignal(request, reply, async (signal) => {
+      const page = await host.browse(user.id, id, {
+        ref: parameter(q.ref, 'ref'), cursor: parameter(q.cursor, 'cursor'), limit: pageLimit(q.limit),
+      }, signal);
+      // The browse list is drawn by the same row as a search result, so it answers
+      // "already on the shelf" the same way.
+      return { ...page, items: annotateOwnership(page.items, host.ownedEntries(user.id, id)) };
+    });
   });
   app.post('/api/v1/sources/:id/search', { preHandler: auth }, async (request, reply) => {
     const user = currentUser(request), { id } = request.params as { id: string };

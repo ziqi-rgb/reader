@@ -1,10 +1,73 @@
-/* 分组管理页：一个列表 + 一个新建表单，几何留给页面，颜色全部走 token。 */
-.groups-screen { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-4); min-height: 100%; }
-.groups-header { display: flex; align-items: center; gap: var(--space-3); }
+/*
+ * 分组管理页：固定的标题栏 + 一个自己滚动的内容列。
+ *
+ * The page is a child of `.app-shell-body`, which clips (`overflow: hidden`) so a
+ * page that only sets `min-height: 100%` grows past the viewport with no way to
+ * reach the bottom — the list is the scroller, the header stays put.
+ *
+ * The column is the same `--page-measure` / `--page-gutter` the four tabs use, so
+ * the page does not sit as a narrow strip against the left edge on a desktop.
+ */
+.sources-screen.groups-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.groups-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: none;
+  box-sizing: border-box;
+  padding: calc(14px + var(--safe-top)) max(var(--page-gutter), calc((100% - var(--page-measure)) / 2)) var(--space-3);
+}
 .groups-header h1 { margin: 0; font-size: var(--text-title); }
-.groups-body { display: flex; flex-direction: column; gap: var(--space-3); max-width: 52rem; }
-.groups-intro { font-size: var(--text-sm); line-height: 1.7; }
-.groups-create { display: flex; align-items: flex-end; gap: var(--space-2); flex-wrap: wrap; }
+.groups-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0 max(var(--page-gutter), calc((100% - var(--page-measure)) / 2)) calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+}
+/* Prose lives in the ⓘ bubble beside the title, not in the page column. */
+.groups-help { position: relative; display: inline-flex; }
+.groups-help-trigger {
+  display: grid; place-items: center; flex: none;
+  width: 28px; height: 28px; padding: 0; border: 1px solid var(--color-line);
+  border-radius: 50%; background: transparent; color: var(--color-muted); cursor: pointer;
+}
+.groups-help-trigger[aria-expanded='true'] { color: var(--reader-accent); border-color: transparent; background: var(--color-brand-soft); }
+.groups-help-trigger:focus-visible { outline: 2px solid var(--reader-accent); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) { .groups-help-trigger:hover { color: var(--color-ink); border-color: var(--color-muted); } }
+.groups-help-panel {
+  position: absolute; z-index: 40;
+  inset-block-start: calc(100% + .5rem); inset-inline-start: 0;
+  box-sizing: border-box;
+  width: min(34rem, calc(100vw - 2rem));
+  padding: .9rem 1rem;
+  display: grid; gap: .6rem;
+  border: 1px solid var(--color-line); border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--color-ink) 12%, transparent);
+}
+.groups-help-panel p { margin: 0; font-size: var(--text-sm); line-height: 1.7; color: var(--color-muted); }
+.groups-help-panel code {
+  padding: .05rem .3rem; border-radius: var(--radius-sm);
+  background: var(--color-surface-2); color: var(--color-ink); font-size: var(--text-sm);
+}
+.groups-create {
+  display: flex; align-items: flex-end; gap: var(--space-2); flex-wrap: wrap;
+  max-width: 44rem; /* an input stretched across 1250px is a form nobody wants to fill */
+}
 .groups-create-field { display: grid; gap: .35rem; flex: 1 1 16rem; font-size: var(--text-sm); color: var(--color-muted); }
 .groups-create-field input {
   padding: .55rem .7rem; border: 1px solid var(--color-line); border-radius: var(--radius-md);
@@ -16,6 +79,43 @@
   padding: .75rem .9rem; border: 1px solid var(--color-line); border-radius: var(--radius-md);
   background: var(--color-surface); flex-wrap: wrap;
 }
-.groups-row-text { display: flex; align-items: baseline; gap: .6rem; min-width: 0; }
+.groups-row-text { display: flex; align-items: center; gap: .6rem; min-width: 0; flex: 1 1 auto; }
 .groups-row-text strong { overflow-wrap: anywhere; }
-.groups-row-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+/* The fold handle: a row with children keeps its own arrow, and a leaf keeps the
+ * same gap so names stay on one vertical line down the tree. */
+.groups-fold {
+  display: grid; place-items: center; flex: none;
+  width: 22px; height: 22px; padding: 0; border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: var(--color-muted); cursor: pointer;
+}
+.groups-fold:focus-visible { outline: 2px solid var(--reader-accent); outline-offset: 1px; }
+.groups-fold-spacer { flex: none; width: 22px; }
+@media (hover: hover) and (pointer: fine) { .groups-fold:hover { background: var(--color-surface-2); } }
+/* The short name is what the row leads with; the path says which parent it is under. */
+.groups-row-path { font-size: var(--text-meta); overflow-wrap: anywhere; }
+.groups-row-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-inline-start: auto; }
+/* The tree is drawn by indenting a row and giving it a spine: indent alone was too
+ * quiet once rows became cards of the same colour. */
+.groups-row[data-level='2'], .groups-row[data-level='3'], .groups-row[data-level='4'] {
+  background: var(--color-surface-2);
+  box-shadow: inset 3px 0 0 var(--color-brand-soft);
+}
+.groups-default-mark {
+  padding: .05rem .4rem; border-radius: var(--radius-pill);
+  background: var(--color-brand-soft); color: var(--reader-accent);
+  font-size: var(--text-meta); font-weight: 600;
+}
+.groups-body > .empty-state { padding: var(--space-4) 0; }
+
+@media (max-width: 700px) {
+  /* A phone row wraps: the name and its counts on one line, the actions under them
+     from the row's own left edge — pushed right they read as an empty gap. */
+  .groups-row-actions { margin-inline-start: 0; }
+  /* The bubble is too wide to hang off the title on a phone: pin it under the header. */
+  .groups-help-panel {
+    position: fixed;
+    inset-inline: 1rem;
+    inset-block-start: calc(56px + var(--safe-top));
+    width: auto;
+  }
+}

@@ -148,6 +148,14 @@ export interface CatalogEntry {
   readonly sourceName?: string;
   readonly options?: readonly AcquisitionOption[];
   readonly metadata?: Readonly<Record<string, unknown>>;
+  /**
+   * The book this entry already became for the requesting account.
+   *
+   * Filled in by the search stream from `source_acquisitions`, matched on
+   * `(source instance, entry ref)` — the only pair that identifies an entry across
+   * two sites' independent id schemes. Absent means "not on this reader's shelf".
+   */
+  readonly bookId?: string;
 }
 
 export interface AcquisitionOption {

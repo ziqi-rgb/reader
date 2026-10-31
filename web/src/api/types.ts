@@ -97,16 +97,42 @@ export interface Book {
   groups?: BookGroupRef[];
 }
 
-/** A group as a book carries it: only the name is drawn. */
+/** A group as it appears on a book: the name is what the card draws. */
 export interface BookGroupRef {
   id: string;
   name: string;
+  /**
+   * `folder` groups are derived from the files' folders (read-only), `unfiled` is
+   * the pseudo-group for "not in any group at all"; anything else is a group the
+   * reader created. A write naming either pseudo-group is dropped by the server.
+   */
+  kind?: 'manual' | 'folder' | 'unfiled';
 }
 
-/** A group as the management screen sees it. */
+/**
+ * A group as the management screen sees it.
+ *
+ * A group is a path in the reader's own tree: 「小说.奇幻.剑与魔法」. `level` and
+ * `parentId` come from the server so the client never has to re-derive the shape
+ * of a name to draw it.
+ */
 export interface BookGroup extends BookGroupRef {
-  /** How many books this account filed into it. */
+  /** Books filed *directly* into it. */
   bookCount: number;
+  /** Books in it and in everything below it, de-duplicated. */
+  subtreeCount: number;
+  /** 1-based depth, at most 3. */
+  level: number;
+  parentId: string | null;
+  /** The group the shelf opens with when no filter is in the URL. At most one. */
+  isDefault: boolean;
+  /**
+   * Folder groups merged into this manual group (same name, same section).
+   *
+   * The shelf writes them into the `groups` parameter joined by `+`, so one chip
+   * filters the hand-filed books and the folder's books together.
+   */
+  folderIds?: string[];
 }
 
 /** How several selected groups combine on the shelf: 或 / 与 / 非. */
@@ -394,3 +420,10 @@ export interface ReadingOverrides { version: number; corrections: Array<{ id: st
 export interface ChapterCacheInfo { chapters: number; bytes: number; total: number; /** 1-based chapter numbers already cached. */ indexes: number[] }
 /** One batch of a "download to the server" run. */
 export interface ChapterCacheBatch { total: number; cached: number; failed: Array<{ title: string; code: string }> }
+/**
+ * Which books have chapters on this server, in one request.
+ *
+ * The shelf draws a badge per card; asking per book would make a 300-book shelf
+ * 300 requests on every paint. A book with nothing cached is simply absent.
+ */
+export interface ChapterCacheSummary { books: Array<{ bookId: string; chapters: number }> }

@@ -22,6 +22,12 @@ ALTER TABLE book_files ADD COLUMN parse_version INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE books ADD COLUMN content_hash_kind TEXT NOT NULL DEFAULT 'file';
 ALTER TABLE chapter_resources ADD COLUMN media_type TEXT NOT NULL DEFAULT 'text/plain';
 ALTER TABLE user_books ADD COLUMN reading_status TEXT;
+ALTER TABLE book_groups ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_book_groups_single_default ON book_groups(user_id) WHERE is_default = 1;
+-- 连载状态 is the reader's own statement about a followed book, not something the
+-- source tells us: NULL means 未标记, otherwise 'ongoing' or 'completed'. Kept on
+-- the subscription because that is the only place 追更 has per-book state.
+ALTER TABLE chapter_subscriptions ADD COLUMN serial_status TEXT;
 `;
 
 export const SCHEMA_SQL = `
