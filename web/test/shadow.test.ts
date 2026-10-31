@@ -144,6 +144,40 @@ describe('sanitiseInjectedContent', () => {
     expect(src).toContain('ref=OEBPS%2Fimages%2Fpic.png');
   });
 
+  it('signs an SVG image reference, which no other attribute walk can see', () => {
+    // The report behind this one: every illustration in every book rendered as the
+    // broken-image placeholder, while the text and the stylesheets were fine.
+    //
+    // An SVG `<image>` names its address `xlink:href` — a *namespaced* attribute.
+    // `[href]` does not match it and `getAttribute('href')` returns null, so this
+    // sanitiser walked straight past every picture in a calibre-made EPUB (their
+    // covers and plates are all `<svg><image xlink:href=…/></svg>`), the browser
+    // fetched the URL with no credential, the API answered 401, and the page drew
+    // a broken image.
+    const node = parse(
+      `<svg><image xlink:href="/api/v1/books/abc/assets?${BOOK_RESOURCE_MARKER}=1&amp;ref=OEBPS%2FImages%2F80967.jpg"></image></svg>`,
+    );
+    sanitiseInjectedContent(node, {
+      signAssetUrl: (url) => `${url}&access_token=tok`,
+    });
+    const href = node.querySelector('image')?.getAttributeNS('http://www.w3.org/1999/xlink', 'href') ?? '';
+    expect(href).toContain('access_token=tok');
+    expect(href).toContain('ref=OEBPS%2FImages%2F80967.jpg');
+  });
+
+  it('drops a remote SVG image reference, keeping the allow-list rule', () => {
+    // An `<image>` is a fetch, and the rule is about fetches rather than about
+    // element names. Both spellings go: SVG 2 allows a plain `href` next to the
+    // namespaced one, and leaving it would keep the remote address live.
+    const node = parse(
+      `<svg><image xlink:href="https://tracker.example/p.gif" href="https://tracker.example/p.gif"></image></svg>`,
+    );
+    sanitiseInjectedContent(node, { signAssetUrl: (url) => `${url}&access_token=tok` });
+    const image = node.querySelector('image');
+    expect(image?.getAttributeNS('http://www.w3.org/1999/xlink', 'href')).toBeNull();
+    expect(image?.hasAttribute('href')).toBe(false);
+  });
+
   it('never hands the token to an address the allow-list refused', () => {
     // Ordering, and it is a security property rather than a nicety: the signer runs
     // *after* the decision that a URL may be fetched. If it ran before, or on the raw

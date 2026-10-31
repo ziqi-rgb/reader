@@ -32,7 +32,7 @@ import {
   capabilities,
 } from '../src/indexer/formats/index.ts';
 import { looksLikeComicDirectory } from '../src/indexer/formats/comic-directory.ts';
-import { BOOK_RESOURCE_MARKER, rewriteRelativeReferences } from '../src/indexer/formats/epub.ts';
+import { BOOK_RESOURCE_MARKER, entryIndex, rewriteRelativeReferences } from '../src/indexer/formats/epub.ts';
 import '../src/indexer/formats/index.ts';
 
 // ---------------------------------------------------------------- fixtures
@@ -815,7 +815,7 @@ describe('reading endpoints per format', () => {
       '<img src="../Images/pic.png"/>',
       'OEBPS/Text',
       (path) => `/api/v1/books/x/assets?${BOOK_RESOURCE_MARKER}=1&ref=${path}`,
-      (path) => path === 'OEBPS/Images/pic.png',
+      (path) => (path === 'OEBPS/Images/pic.png' ? path : null),
     );
     // `&amp;` because the attribute is escaped on the way into the document — the
     // URL is still `...&ref=...` after the browser parses it back.
@@ -825,8 +825,99 @@ describe('reading endpoints per format', () => {
     );
   });
 
-  test('the manifest advertises the markup rendition without moving the reference', async () => {
-    // The reference is also the reading position's identity, so it has to stay
+  test('a reference the container spells differently still reaches its entry', () => {
+    // Both of these used to be "left as is", which is how an illustrated EPUB
+    // ended up with a broken-image placeholder for every plate: the browser then
+    // requested the relative address from the app itself and received the SPA's
+    // HTML with a 200.
+    const entries = ['OEBPS/Images/Cover.JPG', 'OEBPS/Images/中文.jpg'];
+    // The resolver the handler passes in (`entryIndex`) decodes and folds case;
+    // this stands in for it so the rewrite itself can be asserted in isolation.
+    const resolve = (path: string): string | null => {
+      let decoded = path;
+      try {
+        decoded = decodeURIComponent(path);
+      } catch {
+        decoded = path;
+      }
+      return entries.find((name) => name.toLowerCase() === decoded.toLowerCase()) ?? null;
+    };
+    const assetUrl = (path: string): string => `/assets?ref=${encodeURIComponent(path)}`;
+
+    // Letter case: the document says `cover.jpg`, the entry is `Cover.JPG`.
+    assert.equal(
+      rewriteRelativeReferences('<img src="../Images/cover.jpg"/>', 'OEBPS/Text', assetUrl, resolve),
+      `<img src="/assets?ref=${encodeURIComponent('OEBPS/Images/Cover.JPG')}"/>`,
+    );
+    // Percent-encoding: the document escapes the name, the entry is the character.
+    assert.equal(
+      rewriteRelativeReferences(
+        `<img src="../Images/${encodeURIComponent('中文.jpg')}"/>`,
+        'OEBPS/Text',
+        assetUrl,
+        resolve,
+      ),
+      `<img src="/assets?ref=${encodeURIComponent('OEBPS/Images/中文.jpg')}"/>`,
+    );
+    // A container-rooted path is not EPUB, but authoring tools emit it.
+    assert.equal(
+      rewriteRelativeReferences('<img src="/OEBPS/Images/Cover.JPG"/>', 'OEBPS/Text', assetUrl, resolve),
+      `<img src="/assets?ref=${encodeURIComponent('OEBPS/Images/Cover.JPG')}"/>`,
+    );
+    // A genuinely outbound address is still left alone.
+    assert.equal(
+      rewriteRelativeReferences('<img src="https://example.com/a.png"/>', 'OEBPS/Text', assetUrl, resolve),
+      '<img src="https://example.com/a.png"/>',
+    );
+  });
+
+  test('a srcset-only picture keeps every candidate absolute', () => {    const assetUrl = (path: string): string => `/assets?ref=${encodeURIComponent(path)}`;
+    const resolve = (path: string): string | null =>
+      path === 'OEBPS/Images/a.png' || path === 'OEBPS/Images/b.png' ? path : null;
+
+    assert.equal(
+      rewriteRelativeReferences(
+        '<img srcset="../Images/a.png 1x, ../Images/b.png 2x"/>',
+        'OEBPS/Text',
+        assetUrl,
+        resolve,
+      ),
+      `<img srcset="/assets?ref=${encodeURIComponent('OEBPS/Images/a.png')} 1x, /assets?ref=${encodeURIComponent('OEBPS/Images/b.png')} 2x"/>`,
+    );
+    // The attribute's own name is preserved — a `data-srcset` written by a
+    // lazy-loading script keeps its name and gets an absolute address, and a data
+    // URI candidate must survive entirely untouched.
+    assert.equal(
+      rewriteRelativeReferences(
+        '<img data-srcset="../Images/a.png 1x"/>',
+        'OEBPS/Text',
+        assetUrl,
+        resolve,
+      ),
+      `<img data-srcset="/assets?ref=${encodeURIComponent('OEBPS/Images/a.png')} 1x"/>`,
+    );
+    const dataUri = '<img srcset="data:image/png;base64,AA,BB 1x"/>';
+    assert.equal(rewriteRelativeReferences(dataUri, 'OEBPS/Text', assetUrl, resolve), dataUri);
+  });
+
+  test('the container index finds an entry the document spells differently', async () => {
+    // The rewrite above delegates the tolerance to this, so the tolerance itself is
+    // asserted against a real archive rather than a stub: case-folded names, and a
+    // percent-encoded name that has to be decoded before it can match.
+    const archive = await ZipArchive.openBuffer(
+      makeZip([
+        ['OEBPS/Images/Cover.JPG', PNG],
+        ['OEBPS/Images/中文.jpg', PNG],
+      ]),
+    );
+    const lookup = entryIndex(archive);
+    assert.equal(lookup('OEBPS/Images/Cover.JPG'), 'OEBPS/Images/Cover.JPG');
+    assert.equal(lookup('OEBPS/Images/cover.jpg'), 'OEBPS/Images/Cover.JPG');
+    assert.equal(lookup(`OEBPS/Images/${encodeURIComponent('中文.jpg')}`), 'OEBPS/Images/中文.jpg');
+    assert.equal(lookup('OEBPS/Images/missing.png'), null);
+  });
+
+  test('the manifest advertises the markup rendition without moving the reference', async () => {    // The reference is also the reading position's identity, so it has to stay
     // `chapter:<n>` across this change; `format` is what carries the new choice.
     // A client that ignores the field keeps working through `chapter:`.
     const book = await findBook('小说');

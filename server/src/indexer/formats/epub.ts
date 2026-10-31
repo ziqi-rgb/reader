@@ -203,11 +203,15 @@ export const epubHandler = registerFileHandler({
 
   async asset(ctx: HandlerContext, req): Promise<AssetPayload> {
     const archive = await ZipArchive.open(ctx.absPath);
+    // One index for the whole request: a chapter's references are resolved
+    // through it, and so is the chapter itself. Containers disagree with their own
+    // documents about letter case far more often than the spec suggests, which is
+    // why the lookup is not a plain `archive.get`.
+    const lookup = entryIndex(archive);
 
     if (req.ref.startsWith('xhtml:')) {
-      const path = safeDecode(req.ref.slice('xhtml:'.length));
-      const entry = archive.get(path);
-      if (!entry) throw new Error(`chapter not found: ${path}`);
+      const path = lookup(safeDecode(req.ref.slice('xhtml:'.length)));
+      if (!path) throw new Error(`chapter not found: ${req.ref.slice('xhtml:'.length)}`);
 
       const xhtml = await archive.read(path, MAX_CHAPTER_BYTES);
       const rewritten = rewriteChapterDocument(xhtml.toString('utf8'), {
@@ -215,7 +219,7 @@ export const epubHandler = registerFileHandler({
         baseDir: posix.dirname(path),
         assetUrl: (archivePath, fragment) =>
           `${assetBase(ctx)}?${BOOK_RESOURCE_MARKER}=1&ref=${encodeURIComponent(archivePath)}${fragment ? `#${fragment}` : ''}`,
-        exists: (archivePath) => archive.has(archivePath),
+        resolve: lookup,
       });
 
       const body = Buffer.from(rewritten, 'utf8');
@@ -231,7 +235,8 @@ export const epubHandler = registerFileHandler({
 
     // Everything else is addressed by its archive path, percent-encoded by the
     // client when it needs to. Styles, fonts, images and the OPF land here.
-    const name = safeDecode(req.ref);
+    const name = lookup(safeDecode(req.ref));
+    if (!name) throw new Error(`resource not found: ${req.ref}`);
     const entry = archive.get(name);
     if (!entry) throw new Error(`resource not found: ${req.ref}`);
 
@@ -537,7 +542,8 @@ interface ChapterContext {
   /** Directory the chapter's relative references resolve against. */
   baseDir: string;
   assetUrl: (archivePath: string, fragment: string) => string;
-  exists: (archivePath: string) => boolean;
+  /** The entry that actually holds this path, or `null` when nothing does. */
+  resolve: (archivePath: string) => string | null;
 }
 
 /**
@@ -562,7 +568,7 @@ export function rewriteChapterDocument(xhtml: string, chapter: ChapterContext): 
     xhtml,
     chapter.baseDir,
     chapter.assetUrl,
-    chapter.exists,
+    chapter.resolve,
   );
   return injectReaderAssets(withAssets, chapter);
 }
@@ -590,41 +596,122 @@ function injectReaderAssets(xhtml: string, chapter: ChapterContext): string {
 }
 
 /**
- * Rewrite relative `src`/`href` attributes to absolute asset URLs.
+ * Rewrite relative `src`/`href`/`poster`/`srcset` references to absolute asset URLs.
  *
  * A chapter arrives as XHTML with references relative to the OPF's directory
  * (`images/pic.png`). The client fetched that document from the asset endpoint,
  * not from inside the archive, so left alone every image, stylesheet and font
  * resolves to a 404 and the book renders as unstyled text with broken images.
  *
- * `resolve` reports whether the target exists inside the archive. That check is
- * what keeps the rewrite safe: absolute URLs, `data:` URIs, in-document anchors
- * (`#note7`) and mail links are skipped, so footnotes and outbound links keep
- * working instead of being turned into dead asset requests.
+ * `resolve` reports the entry that actually holds a path — not merely whether the
+ * string matches — and that difference is what the tolerance below rests on. It
+ * was a boolean (`archive.has`) once, and the consequence was silent: a reference
+ * that did not match *character for character* was treated as an outbound link,
+ * left relative, and the browser then asked this app's own address for it, got the
+ * SPA's `index.html` back with a 200 and drew the broken-image placeholder. The
+ * three spellings that produced that in practice, all seen in files that render
+ * fine elsewhere:
+ *
+ *  - **Letter case** — `../Images/cover.jpg` for an entry named `Images/Cover.JPG`.
+ *  - **Percent-encoding** — `../Images/%E4%B8%AD%E6%96%87.jpg` for 中文.jpg.
+ *  - **Container-rooted paths** — `/OEBPS/Images/cover.png`, which EPUB does not
+ *    allow but authoring tools emit anyway.
+ *
+ * The rewrite stays *conditional*, and deliberately so: absolute URLs, `data:`
+ * URIs, in-document anchors (`#note7`) and mail links are skipped, so footnotes and
+ * outbound links keep working instead of being turned into dead asset requests.
  */
 export function rewriteRelativeReferences(
   xhtml: string,
   baseDir: string,
   assetUrl: (archivePath: string, fragment: string) => string,
-  resolve: (archivePath: string) => unknown,
+  resolve: (archivePath: string) => string | null,
 ): string {
-  return xhtml.replace(
+  const rewriteUrl = (value: string): string | null => {
+    // A scheme (`https:`, `data:`, `mailto:`), a protocol-relative URL or a
+    // bare fragment is not something we can or should resolve.
+    if (/^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(value)) return null;
+
+    const [path, fragment] = splitFragment(value);
+    if (!path) return null;
+    // A rooted path means the container's root, not the chapter's directory — the
+    // one reading that makes it point at a real entry.
+    const archivePath = path.startsWith('/')
+      ? posix.normalize(path.replace(/^\/+/, ''))
+      : posix.normalize(baseDir === '.' ? path : `${baseDir}/${path}`);
+    const hit = resolve(archivePath);
+    return hit ? assetUrl(hit, fragment) : null;
+  };
+
+  const withAttributes = xhtml.replace(
     /\b(src|href|poster)\s*=\s*("([^"]*)"|'([^']*)')/gi,
     (full: string, attr: string, _quoted: string, doubleQuoted?: string, singleQuoted?: string) => {
       const value = doubleQuoted ?? singleQuoted ?? '';
       if (!value) return full;
-      // A scheme (`https:`, `data:`, `mailto:`), a protocol-relative URL or a
-      // bare fragment is not something we can or should resolve.
-      if (/^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(value)) return full;
-
-      const [path, fragment] = splitFragment(value);
-      if (!path) return full;
-      const resolved = posix.normalize(baseDir === '.' ? path : `${baseDir}/${path}`);
-      if (!resolve(resolved)) return full;
-
-      return `${attr}="${escapeAttribute(assetUrl(resolved, fragment))}"`;
+      const rewritten = rewriteUrl(value.trim());
+      return rewritten === null ? full : `${attr}="${escapeAttribute(rewritten)}"`;
     },
   );
+
+  // `srcset` is a candidate *list*, so it needs its own pass: a picture offered
+  // only as candidates (`<img srcset="a.png 1x, b.png 2x">`, no `src`) would
+  // otherwise reach the browser with relative addresses. The attribute's own name
+  // is preserved — `data-srcset` is somebody else's attribute, not this one.
+  return withAttributes.replace(
+    /\b(srcset)\s*=\s*("([^"]*)"|'([^']*)')/gi,
+    (full: string, attr: string, _quoted: string, doubleQuoted?: string, singleQuoted?: string) => {
+      const value = doubleQuoted ?? singleQuoted ?? '';
+      if (!value) return full;
+      const rewritten = rewriteSrcset(value, rewriteUrl);
+      return rewritten === null ? full : `${attr}="${escapeAttribute(rewritten)}"`;
+    },
+  );
+}
+
+/**
+ * Rewrites the URL of each `srcset` candidate, leaving its descriptor alone.
+ *
+ * `null` means "nothing changed", which keeps the original attribute byte for
+ * byte. A `data:` candidate is left entirely alone rather than split: its payload
+ * is comma-separated base64, so a naive split would shred it.
+ */
+function rewriteSrcset(value: string, rewrite: (url: string) => string | null): string | null {
+  if (/data:/i.test(value)) return null;
+  const out: string[] = [];
+  let changed = false;
+  for (const part of value.split(',')) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const [url, ...descriptor] = trimmed.split(/\s+/);
+    if (!url) continue;
+    const rewritten = rewrite(url);
+    if (rewritten !== null) changed = true;
+    out.push([rewritten ?? url, ...descriptor].join(' '));
+  }
+  return changed ? out.join(', ') : null;
+}
+
+/**
+ * Builds a resolver from archive paths to the entry names that really exist.
+ *
+ * Three answers, in order: the path as written, its percent-decoded form, and a
+ * case-insensitive match. The last is the one that matters in practice — a
+ * container written on Windows or by a careless converter routinely disagrees with
+ * its own documents about case, and a reader that insists on exact equality shows
+ * a perfectly good illustration as a broken image.
+ *
+ * The lower-case index is built on first miss rather than eagerly, so a chapter
+ * whose references all match costs nothing.
+ */
+export function entryIndex(archive: ZipArchive): (archivePath: string) => string | null {
+  let folded: Map<string, string> | null = null;
+  return (archivePath) => {
+    if (archive.has(archivePath)) return archivePath;
+    const decoded = safeDecode(archivePath);
+    if (decoded !== archivePath && archive.has(decoded)) return decoded;
+    folded ??= new Map(archive.entries.map((entry) => [entry.name.toLowerCase(), entry.name]));
+    return folded.get(decoded.toLowerCase()) ?? null;
+  };
 }
 
 /** Escape a URL for embedding in a double-quoted attribute. */

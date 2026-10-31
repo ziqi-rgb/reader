@@ -21,6 +21,15 @@
 import { BOOK_RESOURCE_MARKER } from '../formats/book-resource.ts';
 
 /**
+ * The XLink namespace SVG's `xlink:href` belongs to.
+ *
+ * Named once because the reader needs it twice: to read an SVG `image`
+ * reference and to write one back. It is not `href` — that is the whole reason
+ * an `<image>` slipped past the sanitiser while every `<img>` worked.
+ */
+const XLINK_NAMESPACE = 'http://www.w3.org/1999/xlink';
+
+/**
  * The reading column's own stylesheet, for the shadow root.
  *
  * A selector in the document's stylesheet cannot reach into a shadow root, and
@@ -670,6 +679,37 @@ export function sanitiseInjectedContent(root: ParentNode, options: SanitiseOptio
       if (rewritten === null) element.removeAttribute('srcset');
       else if (rewritten !== srcset) element.setAttribute('srcset', rewritten);
     }
+  }
+
+  // SVG's own `image` element names its address `xlink:href`, and that is a
+  // *namespaced* attribute: `[href]` does not match it and `getAttribute('href')`
+  // returns null, so the loop above walks straight past it.
+  //
+  // This mattered more than it looks. Calibre and most of the Chinese EPUB
+  // pipelines wrap a cover or a colour plate in
+  // `<svg><image xlink:href="../Images/80967.jpg"/></svg>` rather than an `<img>`,
+  // so in such a book *every* illustration kept a URL with no token: the browser
+  // fetched it without a credential, the API answered 401, and the page drew the
+  // broken-image placeholder while the text of the chapter rendered normally.
+  //
+  // Signed exactly like `src`, and dropped exactly like it when the host is not
+  // ours — an `<image>` is a fetch, and the allow-list is about fetches, not about
+  // element names.
+  for (const element of root.querySelectorAll('image')) {
+    const value = element.getAttributeNS(XLINK_NAMESPACE, 'href');
+    if (value === null || value.trim() === '') continue;
+    const resolved = resolveBookResource(value);
+    if (resolved === null) {
+      element.removeAttributeNS(XLINK_NAMESPACE, 'href');
+      // SVG 2 lets a document carry a plain `href` alongside the namespaced one;
+      // dropping only the one we happened to read would leave the address live.
+      element.removeAttribute('href');
+      continue;
+    }
+    const signed = sign(resolved, options);
+    if (signed === value) continue;
+    element.setAttributeNS(XLINK_NAMESPACE, 'xlink:href', signed);
+    if (element.hasAttribute('href')) element.setAttribute('href', signed);
   }
 
   // `url(...)` inside the chapter's own CSS.

@@ -1,6 +1,15 @@
 import type { Resource } from '../formats/types.ts';
 
 /**
+ * The XLink namespace SVG's `xlink:href` lives in.
+ *
+ * Kept local rather than imported from `shadow.ts`: that module registers a
+ * custom element as a side effect, and this one is used from tests and workers
+ * that want the resolver alone.
+ */
+const XLINK_NAMESPACE = 'http://www.w3.org/1999/xlink';
+
+/**
  * Resolves `reader-res:` URLs found in injected content.
  *
  * Injected chapter markup never touches the network directly. The loader rewrote
@@ -99,15 +108,25 @@ export async function hydrateResources(root: ParentNode, resolver: ResourceResol
     );
   }
 
-  for (const element of root.querySelectorAll('use')) {
-    const value = element.getAttribute('href') ?? element.getAttribute('xlink:href') ?? '';
+  // `<use>` points at a symbol; `<image>` is SVG's own picture element and is how
+  // calibre-written EPUBs wrap a cover or a colour plate. Both name their target
+  // `href`, and in a document that came from an XHTML archive that attribute is
+  // usually the *namespaced* `xlink:href` — neither `querySelectorAll('[href]')`
+  // nor `getAttribute('href')` sees it, so an `<image>` used to keep its
+  // `reader-res:` address and never resolve to anything the browser could draw.
+  for (const element of root.querySelectorAll('use, image')) {
+    const namespaced = element.getAttributeNS(XLINK_NAMESPACE, 'href');
+    const plain = element.getAttribute('href');
+    const value = namespaced ?? plain ?? '';
     if (!value.startsWith('reader-res:')) continue;
     tasks.push(
       resolver.resolveReaderUrl(value).then((url) => {
-        if (url) {
-          element.setAttribute('href', url);
-          element.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', url);
-        }
+        if (!url) return;
+        // Written back to the spelling the document used, plus the other one when
+        // it is already present: a renderer is free to read either, and a stale
+        // copy of the old address would keep the picture broken.
+        if (namespaced !== null) element.setAttributeNS(XLINK_NAMESPACE, 'xlink:href', url);
+        if (namespaced === null || plain !== null) element.setAttribute('href', url);
       }),
     );
   }
