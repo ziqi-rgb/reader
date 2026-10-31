@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render } from '../src/shared/ui/render-root.ts';
 import { RuntimeContext } from '../src/app/providers/runtime-context.tsx';
+import { compareGroupNames } from '../src/features/shelf/groups.ts';
 
 /**
  * 分组管理 draws the shelf tree, and its rows can be folded.
@@ -38,27 +39,42 @@ const paint = () => act(() => render(
     </QueryClientProvider>
   </RuntimeContext.Provider>, root));
 const rowNames = () => [...root.querySelectorAll('.groups-row strong')].map(node => node.textContent);
+/** The order the page promises: siblings by name, the way `groupTree` sorts them. */
+const sorted = (names: string[]) => [...names].sort(compareGroupNames);
+/** The row's `<strong>` draws the last step of the path, not the whole path. */
+const shortNames = (names: string[]) => sorted(names).map(name => name.split('.').pop());
 const fold = (label: string) => act(() => root.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click());
 afterEach(() => { act(() => render(null, root)); createBookGroup.mockClear(); });
 
-it('draws the tree in order, indented by level', () => {
+it('opens folded, listing only the 一级组 in 拼音 order', () => {
   paint();
-  // 未分组 never appears here: it is a filter on the shelf, not a group to manage.
-  expect(rowNames()).toEqual(['小说', '奇幻', '剑与魔法', '恐怖', '科幻']);
+  // A four-level tree drawn open buries the 一级组 — the rows most readers come here
+  // for — somewhere in the middle, so nothing below the top level is drawn until the
+  // reader opens it. 未分组 never appears: it is a shelf filter, not a group to manage.
+  expect(rowNames()).toEqual(sorted(['小说', '科幻']));
   expect([...root.querySelectorAll('.groups-row')].map(row => row.getAttribute('data-level')))
-    .toEqual(['1', '2', '3', '2', '1']);
-  // The path is what tells two same-named children apart; the leaf names do not repeat it.
-  expect([...root.querySelectorAll('.groups-row-path')].map(node => node.textContent))
-    .toEqual(['小说.奇幻', '小说.奇幻.剑与魔法', '小说.恐怖']);
+    .toEqual(['1', '1']);
 });
 
-it('folds and reopens a subtree from the row that owns it', async () => {
+it('opens a subtree from the row that owns it, depth first', async () => {
   paint();
-  await fold('收起「小说」的 2 个子分组');
-  expect(rowNames()).toEqual(['小说', '科幻']);
   await fold('展开「小说」的 2 个子分组');
-  expect(rowNames()).toEqual(['小说', '奇幻', '剑与魔法', '恐怖', '科幻']);
-  // Folding a middle row keeps its siblings, and hides only what is under it.
-  await fold('收起「奇幻」的 1 个子分组');
-  expect(rowNames()).toEqual(['小说', '奇幻', '恐怖', '科幻']);
+  // The parent first, then its children by name; 剑与魔法 stays hidden because its
+  // own parent is still folded. Rows draw the last step of the path.
+  expect(rowNames()).toEqual(['科幻', '小说', ...shortNames(['小说.恐怖', '小说.奇幻'])]);
+  expect([...root.querySelectorAll('.groups-row')].map(row => row.getAttribute('data-level')))
+    .toEqual(['1', '1', '2', '2']);
+  // The path is what tells two same-named children apart; the leaf names do not repeat it.
+  expect([...root.querySelectorAll('.groups-row-path')].map(node => node.textContent))
+    .toEqual(sorted(['小说.恐怖', '小说.奇幻']));
+
+  // One level further: a 三级组 sits directly under the 二级 that owns it.
+  await fold('展开「奇幻」的 1 个子分组');
+  expect(rowNames()).toEqual(['科幻', '小说', ...shortNames(['小说.恐怖', '小说.奇幻']), '剑与魔法']);
+  expect([...root.querySelectorAll('.groups-row')].map(row => row.getAttribute('data-level')))
+    .toEqual(['1', '1', '2', '2', '3']);
+
+  // Folding 小说 takes its whole subtree with it, and keeps its sibling.
+  await fold('收起「小说」的 2 个子分组');
+  expect(rowNames()).toEqual(sorted(['小说', '科幻']));
 });

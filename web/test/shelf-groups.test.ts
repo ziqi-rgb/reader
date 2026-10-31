@@ -3,6 +3,7 @@ import {
   activeTopGroupOf,
   childGroupName,
   childLevelsOf,
+  compareGroupNames,
   countedGroup,
   countedSubtree,
   defaultGroup,
@@ -39,6 +40,9 @@ const group = (id: string, name: string, extra: Partial<BookGroup> = {}): BookGr
   isDefault: false,
   ...extra,
 });
+
+/** Sorted the way the page sorts: siblings by name, through its own collator. */
+const sorted = (names: string[]) => [...names].sort(compareGroupNames);
 
 const groups: BookGroup[] = [
   group('n', '小说', { subtreeCount: 4 }),
@@ -119,22 +123,30 @@ describe('group tree', () => {
     expect(groupRootOf(groups, 'gone')).toBeUndefined();
   });
 
-  it('draws parents before children, and keeps a group whose parent is missing', () => {
+  it('draws parents before children, siblings by name, and keeps an orphan', () => {
     const orphan = group('x', '孤儿.子组');
     const tree = groupTree([...groups, orphan]);
-    expect(tree.map(node => node.group.name)).toEqual(['小说', '小说家', '科幻', '孤儿.子组']);
-    expect(tree[0].children.map(node => node.group.name)).toEqual(['小说.奇幻', '小说.恐怖']);
-    expect(flattenGroupTree(tree).map(entry => entry.name))
-      .toEqual(['小说', '小说.奇幻', '小说.奇幻.剑与魔法', '小说.恐怖', '小说家', '科幻', '孤儿.子组']);
+    // Siblings come out in the collator's order, at every level.
+    expect(tree.map(node => node.group.name)).toEqual(sorted(['小说', '小说家', '科幻', '孤儿.子组']));
+    expect(tree.find(node => node.group.id === 'n')!.children.map(node => node.group.name))
+      .toEqual(sorted(['小说.奇幻', '小说.恐怖']));
+
+    // Depth first: a parent is immediately followed by its own subtree, so a 三级组
+    // never lands somewhere below an unrelated 一级组.
+    const flat = flattenGroupTree(tree).map(entry => entry.name);
+    expect(flat).toHaveLength(7);
+    const start = flat.indexOf('小说');
+    expect(flat.slice(start + 1, start + 3)).toEqual(sorted(['小说.恐怖', '小说.奇幻']));
+    expect(flat[start + 3]).toBe('小说.奇幻.剑与魔法');
   });
 
   it('folds a subtree but keeps the folded row itself', () => {
     const tree = groupTree(groups);
     // The folded row is the handle that reopens it, so it always stays on screen.
     expect(flattenGroupTree(tree, id => id === 'n').map(entry => entry.name))
-      .toEqual(['小说', '小说家', '科幻']);
+      .toEqual(sorted(['小说', '小说家', '科幻']));
     expect(flattenGroupTree(tree, id => id === 'n-f').map(entry => entry.name))
-      .toEqual(['小说', '小说.奇幻', '小说.恐怖', '小说家', '科幻']);
+      .toEqual(sorted(['小说', '小说.奇幻', '小说.恐怖', '小说家', '科幻']));
   });
 
   it('knows which group the shelf opens with', () => {

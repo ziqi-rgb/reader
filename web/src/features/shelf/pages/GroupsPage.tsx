@@ -46,8 +46,15 @@ export function GroupsPage() {
   const [childName, setChildName] = useState('');
   /** Which level the new group takes — a tag may sit straight under a 大类. */
   const [childLevel, setChildLevel] = useState(2);
-  /** Folded rows; a row is still drawn when folded, only its subtree hides. */
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  /**
+   * Which parents the reader has opened.
+   *
+   * Empty by default, so the page opens folded: a tree of four levels listed open is
+   * a wall of rows where the 一级组 — the only rows most readers come here for — are
+   * somewhere in the middle. A folded row is still drawn (it is the handle that
+   * reopens it), so nothing becomes unreachable.
+   */
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   /** The ⓘ bubble beside the title: hover opens it, a click pins it (phones have no hover). */
   const [helpOpen, setHelpOpen] = useState(false);
   const [helpPinned, setHelpPinned] = useState(false);
@@ -61,8 +68,8 @@ export function GroupsPage() {
       : group)),
   [groups.data, seriesAsOne]);
   const rows = useMemo(
-    () => flattenGroupTree(groupTree(all), id => collapsed.has(id)),
-    [all, collapsed],
+    () => flattenGroupTree(groupTree(all), id => !expanded.has(id)),
+    [all, expanded],
   );
   const defaultId = all.find(group => group.isDefault)?.id ?? null;
 
@@ -127,12 +134,7 @@ export function GroupsPage() {
       setChildName('');
       setCreatingUnder(null);
       // The new row lives under the parent, so a folded parent has to open.
-      setCollapsed(current => {
-        if (!current.has(parent.id)) return current;
-        const next = new Set(current);
-        next.delete(parent.id);
-        return next;
-      });
+      setExpanded(current => new Set(current).add(parent.id));
     }, '创建分组失败');
   };
   /** Opens 「新建子分组」 at the first level the parent allows. */
@@ -162,7 +164,7 @@ export function GroupsPage() {
   const setDefault = (id: string | null) => {
     void run(async () => { await runtime.api.setDefaultBookGroup(id); }, '设置默认分组失败');
   };
-  const toggleCollapsed = (id: string) => setCollapsed(current => {
+  const toggleExpanded = (id: string) => setExpanded(current => {
     const next = new Set(current);
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
@@ -205,14 +207,14 @@ export function GroupsPage() {
       <ul className="groups-list">
         {rows.map(group => {
           const childCount = groupChildren(all, group.id).length;
-          const folded = collapsed.has(group.id);
+          const folded = !expanded.has(group.id);
           return <li key={group.id} className="groups-row" data-level={group.level}
             style={{ paddingInlineStart: `calc(.5rem + ${(group.level - 1) * 1.4}rem)` }}>
             <div className="groups-row-text">
               {childCount > 0
                 ? <button type="button" className="groups-fold" aria-expanded={!folded}
                   aria-label={`${folded ? '展开' : '收起'}「${groupShortName(group.name)}」的 ${childCount} 个子分组`}
-                  onClick={() => toggleCollapsed(group.id)}>
+                  onClick={() => toggleExpanded(group.id)}>
                   {folded ? <ChevronRight size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
                 </button>
                 : <span className="groups-fold-spacer" aria-hidden="true" />}

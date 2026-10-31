@@ -276,17 +276,37 @@ export function groupPathLabel(name: string): string {
     .join(GROUP_PATH_SEPARATOR);
 }
 
+/**
+ * The order group names are listed in: the reader's language, not bytes.
+ *
+ * 「首字母」 in Chinese means 拼音, and `Intl.Collator` is the only thing that knows
+ * it — SQLite's `COLLATE NOCASE` folds ASCII case and compares everything else as
+ * UTF-8 bytes, so the server's order for Chinese names looks arbitrary. Digits are
+ * compared numerically (`二级 2` before `二级 10`), and case/width variants fold.
+ */
+const GROUP_NAME_COLLATOR = new Intl.Collator('zh-Hans', { numeric: true, sensitivity: 'base' });
+
+/** Compares two group names the way the management page lists them. */
+export function compareGroupNames(a: string, b: string): number {
+  return GROUP_NAME_COLLATOR.compare(a, b);
+}
+
 export interface GroupTreeNode {
   group: BookGroup;
   children: GroupTreeNode[];
 }
 
 /**
- * The tree in drawing order.
+ * The tree in drawing order: depth first, siblings by name.
  *
  * Parents are placed by `parentId`; a group whose parent is missing (an old row, or
  * a response from an older build) is shown at the top rather than dropped, so a
  * reader can still rename or delete it.
+ *
+ * The sort lives here rather than in the components because it is the *shape* the
+ * reader asked for: every group immediately followed by its own subtree, and each
+ * level's siblings in 拼音 order. Depth-first is what puts 「三级组」 under the 二级
+ * it belongs to instead of somewhere further down the page.
  */
 export function groupTree(groups: readonly BookGroup[]): GroupTreeNode[] {
   const known = new Set(groups.map((group) => group.id));
@@ -301,11 +321,12 @@ export function groupTree(groups: readonly BookGroup[]): GroupTreeNode[] {
       roots.push(group);
     }
   }
+  const inOrder = (list: BookGroup[]) => list.sort((a, b) => compareGroupNames(a.name, b.name));
   const build = (group: BookGroup): GroupTreeNode => ({
     group,
-    children: (byParent.get(group.id) ?? []).map(build),
+    children: inOrder(byParent.get(group.id) ?? []).map(build),
   });
-  return roots.map(build);
+  return inOrder(roots).map(build);
 }
 
 /**
